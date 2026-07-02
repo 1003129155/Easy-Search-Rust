@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/easysearch-core",
+    "crates/easysearch",
+    "crates/easysearch-mft",
+    "crates/easysearch-security",
+    "crates/uffs-polars",
+    "crates/uffs-text",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["LIJIALU"]
+publish = false

@@ -1,0 +1,49 @@
+[package]
+name = "easysearch-security"
+# The crate is named easysearch-security but the source uses `uffs_security`
+# internally. The daemon references it as `easysearch_security` so we need
+# the lib to export under that name. Cargo maps `easysearch-security` →
+# `easysearch_security` automatically for external consumers.
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+# Named uffs_security so copied mft code (`use uffs_security::...`) works unchanged.
+# The daemon imports it via Cargo alias `easysearch-security = { package = ... }` → `easysearch_security`.
+name = "uffs_security"
+path = "src/lib.rs"
+
+[dependencies]
+tracing = "0.1"
+dirs-next = "2"
+aes-gcm = "0.10"
+rand = "0.10"
+memmap2 = "0.9"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Security_WinTrust",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+    "Win32_System_Pipes",
+    "Win32_System_Memory",
+] }
+
+# Suppress strict lints from copied code
+[lints.clippy]
+all = "allow"
+pedantic = "allow"
+nursery = "allow"

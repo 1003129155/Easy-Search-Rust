@@ -1,0 +1,816 @@
+// Copyright (c) 2025-2026 LIJIALU. MIT License.
+
+//! In-memory representation of an EasySearch index.
+
+use std::collections::BTreeMap;
+
+use crate::delta::{EsDeltaOverlay, InsertedRecord};
+use crate::error::{EsError, Result};
+use crate::path::normalize_path_for_lookup;
+use crate::record::{EsRecord, PARENT_NONE, flags as es_flags, mft_record_number};
+use crate::search::{EsSearchIndex, EsSearchResult, score_name};
+use crate::status::EsIndexStatus;
+use crate::usn::{EsUsnEvent, EsUsnEventKind};
+
+const MISSING_INDEX: u32 = u32::MAX;
+
+/// Sorted file-reference lookup entry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+pub struct FileRefEntry {
+    /// NTFS file reference or low 48-bit record number.
+    pub file_ref: u64,
+    /// Record index in [`EsIndex::records`].
+    pub idx: u32,
+    /// Explicit padding for 8-byte alignment.
+    #[expect(
+        clippy::pub_underscore_fields,
+        reason = "bytemuck Pod requires all fields same visibility"
+    )]
+    pub _pad: u32,
+}
+
+/// Lookup table from NTFS file reference to record index.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum FileRefMap {
+    /// Empty map.
+    #[default]
+    Empty,
+    /// Dense map keyed by low 48-bit MFT record number.
+    Dense {
+        /// First MFT record number represented by `slots[0]`.
+        base_record_number: u64,
+        /// Slot values; [`MISSING_INDEX`] means absent.
+        slots: Vec<u32>,
+    },
+    /// Sorted sparse entries.
+    Sorted(Vec<FileRefEntry>),
+}
+
+impl FileRefMap {
+    /// Build a dense or sorted lookup from `(file_ref, idx)` pairs.
+    #[must_use]
+    pub fn from_pairs(pairs: &[(u64, u32)]) -> Self {
+        if pairs.is_empty() {
+            return Self::Empty;
+        }
+
+        let mut record_numbers: Vec<u64> = pairs
+            .iter()
+            .map(|(file_ref, _)| mft_record_number(*file_ref))
+            .collect();
+        record_numbers.sort_unstable();
+        let first = record_numbers[0];
+        let last = record_numbers[record_numbers.len() - 1];
+        let span = last.saturating_sub(first).saturating_add(1);
+
+        if let Ok(span_len) = usize::try_from(span) {
+            if span_len <= pairs.len().saturating_mul(4).max(1_024) {
+                let mut slots = vec![MISSING_INDEX; span_len];
+                for (file_ref, idx) in pairs {
+                    let record_number = mft_record_number(*file_ref);
+                    let slot_idx =
+                        usize::try_from(record_number.saturating_sub(first)).unwrap_or(usize::MAX);
+                    if let Some(slot) = slots.get_mut(slot_idx) {
+                        *slot = *idx;
+                    }
+                }
+                return Self::Dense {
+                    base_record_number: first,
+                    slots,
+                };
+            }
+        }
+
+        let mut entries: Vec<FileRefEntry> = pairs
+            .iter()
+            .map(|(file_ref, idx)| FileRefEntry {
+                file_ref: *file_ref,
+                idx: *idx,
+                _pad: 0,
+            })
+            .collect();
+        entries.sort_unstable_by_key(|entry| mft_record_number(entry.file_ref));
+        Self::Sorted(entries)
+    }
+
+    /// Return the record index for `file_ref`.
+    #[must_use]
+    pub fn get(&self, file_ref: u64) -> Option<u32> {
+        let record_number = mft_record_number(file_ref);
+        match self {
+            Self::Empty => None,
+            Self::Dense {
+                base_record_number,
+                slots,
+            } => {
+                let slot_idx =
+                    usize::try_from(record_number.checked_sub(*base_record_number)?).ok()?;
+                slots
+                    .get(slot_idx)
+                    .copied()
+                    .filter(|idx| *idx != MISSING_INDEX)
+            }
+            Self::Sorted(entries) => entries
+                .binary_search_by_key(&record_number, |entry| mft_record_number(entry.file_ref))
+                .ok()
+                .and_then(|entry_idx| entries.get(entry_idx).map(|entry| entry.idx)),
+        }
+    }
+
+    /// Insert or replace a lookup entry.
+    pub fn insert(&mut self, file_ref: u64, idx: u32) {
+        let mut pairs = self.pairs();
+        if let Some((_, existing_idx)) = pairs.iter_mut().find(|(existing_ref, _)| {
+            mft_record_number(*existing_ref) == mft_record_number(file_ref)
+        }) {
+            *existing_idx = idx;
+        } else {
+            pairs.push((file_ref, idx));
+        }
+        *self = Self::from_pairs(&pairs);
+    }
+
+    /// Remove a lookup entry.
+    pub fn remove(&mut self, file_ref: u64) {
+        let record_number = mft_record_number(file_ref);
+        let pairs: Vec<(u64, u32)> = self
+            .pairs()
+            .into_iter()
+            .filter(|(existing_ref, _)| mft_record_number(*existing_ref) != record_number)
+            .collect();
+        *self = Self::from_pairs(&pairs);
+    }
+
+    /// Return all `(file_ref, idx)` pairs in this map.
+    #[must_use]
+    pub fn pairs(&self) -> Vec<(u64, u32)> {
+        match self {
+            Self::Empty => Vec::new(),
+            Self::Dense {
+                base_record_number,
+                slots,
+            } => slots
+                .iter()
+                .enumerate()
+                .filter_map(|(offset, idx)| {
+                    if *idx == MISSING_INDEX {
+                        None
+                    } else {
+                        let record_number =
+                            base_record_number.saturating_add(u64::try_from(offset).ok()?);
+                        Some((record_number, *idx))
+                    }
+                })
+                .collect(),
+            Self::Sorted(entries) => entries
+                .iter()
+                .map(|entry| (entry.file_ref, entry.idx))
+                .collect(),
+        }
+    }
+}
+
+/// EasySearch index over one volume.
+#[derive(Debug, Clone, Default)]
+pub struct EsIndex {
+    /// Fixed-width record column.
+    pub records: Vec<EsRecord>,
+    /// Concatenated UTF-8 basenames.
+    pub names: Vec<u8>,
+    /// CSR offsets into [`EsIndex::children_indices`].
+    pub children_offsets: Vec<u32>,
+    /// CSR child record indices.
+    pub children_indices: Vec<u32>,
+    /// File-reference lookup used by USN updates.
+    pub file_ref_map: FileRefMap,
+    /// Derived filename search structures.
+    pub search: EsSearchIndex,
+    /// Pending changes above the base snapshot.
+    pub delta: EsDeltaOverlay,
+    /// Runtime status for this index.
+    pub status: EsIndexStatus,
+}
+
+impl EsIndex {
+    /// Construct an index from pre-built columns.
+    #[must_use]
+    pub fn from_parts(
+        records: Vec<EsRecord>,
+        names: Vec<u8>,
+        children_offsets: Vec<u32>,
+        children_indices: Vec<u32>,
+        file_ref_map: FileRefMap,
+        search: EsSearchIndex,
+        status: EsIndexStatus,
+    ) -> Self {
+        Self {
+            records,
+            names,
+            children_offsets,
+            children_indices,
+            file_ref_map,
+            search,
+            delta: EsDeltaOverlay::default(),
+            status,
+        }
+    }
+
+    /// Return the number of base records.
+    #[must_use]
+    pub fn records_len(&self) -> usize {
+        self.records.len()
+    }
+
+    /// Return a record by index.
+    pub fn record(&self, index: u32) -> Result<EsRecord> {
+        let idx = usize::try_from(index).map_err(|_| EsError::RecordIndexOutOfRange {
+            index,
+            len: self.records.len(),
+        })?;
+        self.records
+            .get(idx)
+            .copied()
+            .ok_or(EsError::RecordIndexOutOfRange {
+                index,
+                len: self.records.len(),
+            })
+    }
+
+    /// Return a record basename.
+    pub fn name(&self, index: u32) -> Result<&str> {
+        let record = self.record(index)?;
+        let start =
+            usize::try_from(record.name_offset).map_err(|_| EsError::InvalidNameRange {
+                index,
+                offset: record.name_offset,
+                len: record.name_len,
+            })?;
+        let len = usize::from(record.name_len);
+        let end = start.checked_add(len).ok_or(EsError::InvalidNameRange {
+            index,
+            offset: record.name_offset,
+            len: record.name_len,
+        })?;
+        let bytes = self
+            .names
+            .get(start..end)
+            .ok_or(EsError::InvalidNameRange {
+                index,
+                offset: record.name_offset,
+                len: record.name_len,
+            })?;
+        core::str::from_utf8(bytes).map_err(EsError::from)
+    }
+
+    /// Reconstruct a full path by walking parent indices.
+    pub fn path_from_idx(&self, index: u32) -> Result<String> {
+        let mut parts = Vec::new();
+        let mut current = index;
+        for _ in 0..=self.records.len() {
+            let record = self.record(current)?;
+            parts.push(self.name(current)?.to_string());
+            if record.parent_idx == PARENT_NONE {
+                parts.reverse();
+                return Ok(join_path_parts(&parts));
+            }
+            current = record.parent_idx;
+        }
+        Err(EsError::ParentCycle { index })
+    }
+
+    /// Return direct children for `index`.
+    pub fn children(&self, index: u32) -> Result<&[u32]> {
+        let idx = usize::try_from(index).map_err(|_| EsError::RecordIndexOutOfRange {
+            index,
+            len: self.records.len(),
+        })?;
+        if idx >= self.records.len() {
+            return Err(EsError::RecordIndexOutOfRange {
+                index,
+                len: self.records.len(),
+            });
+        }
+        let start =
+            self.children_offsets
+                .get(idx)
+                .copied()
+                .ok_or(EsError::RecordIndexOutOfRange {
+                    index,
+                    len: self.records.len(),
+                })?;
+        let end = self
+            .children_offsets
+            .get(idx.saturating_add(1))
+            .copied()
+            .ok_or(EsError::RecordIndexOutOfRange {
+                index,
+                len: self.records.len(),
+            })?;
+        let start_idx = usize::try_from(start).map_err(|_| EsError::RecordIndexOutOfRange {
+            index,
+            len: self.records.len(),
+        })?;
+        let end_idx = usize::try_from(end).map_err(|_| EsError::RecordIndexOutOfRange {
+            index,
+            len: self.records.len(),
+        })?;
+        self.children_indices
+            .get(start_idx..end_idx)
+            .ok_or(EsError::RecordIndexOutOfRange {
+                index,
+                len: self.records.len(),
+            })
+    }
+
+    /// Number of base records as a `u32` (saturating).
+    #[must_use]
+    fn base_len(&self) -> u32 {
+        u32::try_from(self.records.len()).unwrap_or(u32::MAX)
+    }
+
+    /// Total logical record count (base + overlay-inserted).
+    #[must_use]
+    fn logical_len(&self) -> u32 {
+        self.base_len()
+            .saturating_add(u32::try_from(self.delta.inserted.len()).unwrap_or(0))
+    }
+
+    /// Borrow an inserted overlay record by logical index.
+    fn inserted_at(&self, index: u32) -> Option<&InsertedRecord> {
+        let pos = usize::try_from(index.checked_sub(self.base_len())?).ok()?;
+        self.delta.inserted.get(pos)
+    }
+
+    /// Return `true` when a logical index is tombstoned (base flag or overlay).
+    #[must_use]
+    fn logical_is_deleted(&self, index: u32) -> bool {
+        if self.delta.is_deleted(index) {
+            return true;
+        }
+        if index < self.base_len() {
+            return self
+                .record(index)
+                .map(EsRecord::is_tombstone)
+                .unwrap_or(true);
+        }
+        self.inserted_at(index).is_none()
+    }
+
+    /// Effective basename for a logical index, honouring overlay renames.
+    fn logical_name(&self, index: u32) -> Option<String> {
+        if let Some(name) = self.delta.renamed.get(&index) {
+            return Some(name.clone());
+        }
+        if index < self.base_len() {
+            return self.name(index).ok().map(str::to_owned);
+        }
+        self.inserted_at(index).map(|rec| rec.name.clone())
+    }
+
+    /// Effective parent logical index, or `None` for a root.
+    fn logical_parent(&self, index: u32) -> Option<u32> {
+        if let Some(&moved) = self.delta.moved.get(&index) {
+            return if moved == PARENT_NONE { None } else { Some(moved) };
+        }
+        if index < self.base_len() {
+            let parent = self.record(index).ok()?.parent_idx;
+            return if parent == PARENT_NONE {
+                None
+            } else {
+                Some(parent)
+            };
+        }
+        let parent_ref = self.inserted_at(index)?.parent_ref;
+        self.file_ref_map.get(parent_ref)
+    }
+
+    /// Effective directory flag for a logical index.
+    #[must_use]
+    fn logical_is_dir(&self, index: u32) -> bool {
+        if index < self.base_len() {
+            self.record(index)
+                .map(EsRecord::is_directory)
+                .unwrap_or(false)
+        } else {
+            self.inserted_at(index)
+                .map(|rec| rec.flags & es_flags::DIRECTORY != 0)
+                .unwrap_or(false)
+        }
+    }
+
+    /// Reconstruct a full path for a logical index across base + overlay.
+    fn logical_path(&self, index: u32) -> Result<String> {
+        let mut parts = Vec::new();
+        let mut current = index;
+        for _ in 0..=self.logical_len() {
+            let name = self
+                .logical_name(current)
+                .ok_or(EsError::RecordIndexOutOfRange {
+                    index: current,
+                    len: self.records.len(),
+                })?;
+            parts.push(name);
+            match self.logical_parent(current) {
+                None => {
+                    parts.reverse();
+                    return Ok(join_path_parts(&parts));
+                }
+                Some(parent) => current = parent,
+            }
+        }
+        Err(EsError::ParentCycle { index })
+    }
+
+    /// Effective children of a logical directory index across base + overlay.
+    fn logical_children(&self, index: u32) -> Vec<u32> {
+        let mut kids = Vec::new();
+
+        if index < self.base_len() {
+            if let Ok(base_children) = self.children(index) {
+                for &child in base_children {
+                    if self.delta.deleted.contains(&child) {
+                        continue;
+                    }
+                    if let Some(&new_parent) = self.delta.moved.get(&child) {
+                        if new_parent != index {
+                            continue;
+                        }
+                    }
+                    kids.push(child);
+                }
+            }
+        }
+
+        for (&moved_idx, &new_parent) in &self.delta.moved {
+            if new_parent != index || self.delta.deleted.contains(&moved_idx) {
+                continue;
+            }
+            if moved_idx < self.base_len() {
+                if let Ok(rec) = self.record(moved_idx) {
+                    if rec.parent_idx == index {
+                        continue;
+                    }
+                }
+            }
+            kids.push(moved_idx);
+        }
+
+        for pos in 0..self.delta.inserted.len() {
+            let logical = self
+                .base_len()
+                .saturating_add(u32::try_from(pos).unwrap_or(u32::MAX));
+            if self.delta.deleted.contains(&logical) {
+                continue;
+            }
+            if self.logical_parent(logical) == Some(index) {
+                kids.push(logical);
+            }
+        }
+
+        kids
+    }
+
+    /// Search basenames and return slim results.
+    pub fn search(&self, query: &str, limit: usize) -> Vec<EsSearchResult> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let query_folded = crate::search::fold::fold_text(query);
+
+        let mut scored: Vec<(u32, Vec<[u32; 2]>, u32)> = Vec::new();
+
+        if query_folded.is_empty() {
+            for index in 0..self.logical_len() {
+                if self.logical_is_deleted(index) {
+                    continue;
+                }
+                let is_dir = self.logical_is_dir(index);
+                scored.push((score_name("", "", is_dir).unwrap_or((0, Vec::new())).0, Vec::new(), index));
+                if scored.len() >= limit {
+                    break;
+                }
+            }
+        } else if query_folded.chars().count() <= 2 {
+            let candidates = self.search.prefix.candidates(&query_folded);
+            for index in candidates {
+                if index >= self.base_len() || self.logical_is_deleted(index) {
+                    continue;
+                }
+                if let Some(name) = self.logical_name(index) {
+                    let is_dir = self.logical_is_dir(index);
+                    if let Some((score, highlight)) = score_name(&query_folded, &name, is_dir) {
+                        scored.push((score, highlight, index));
+                    }
+                }
+            }
+            self.scan_delta_inserted(&query_folded, &mut scored);
+        } else {
+            for (record_idx, record) in self.records.iter().enumerate() {
+                let index = record_idx as u32;
+                if record.is_tombstone() || self.delta.is_deleted(index) {
+                    continue;
+                }
+                let start = record.name_offset as usize;
+                let end = start + record.name_len as usize;
+                let name_bytes = match self.names.get(start..end) {
+                    Some(b) => b,
+                    None => continue,
+                };
+                let name = match core::str::from_utf8(name_bytes) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let is_dir = record.is_directory();
+                if let Some((score, highlight)) = score_name(&query_folded, name, is_dir) {
+                    insert_top_n(&mut scored, (score, highlight, index), limit.saturating_mul(2));
+                }
+            }
+            self.scan_delta_inserted(&query_folded, &mut scored);
+        }
+
+        scored.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        scored.truncate(limit);
+
+        let mut results = Vec::with_capacity(scored.len());
+        for (score, highlight, index) in scored {
+            let name = match self.logical_name(index) {
+                Some(n) => n,
+                None => continue,
+            };
+            let path = match self.logical_path(index) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let is_dir = self.logical_is_dir(index);
+            results.push(EsSearchResult {
+                path,
+                name,
+                is_directory: is_dir,
+                score,
+                highlight,
+            });
+        }
+        results
+    }
+
+    /// Scan delta-inserted records for matches.
+    fn scan_delta_inserted(
+        &self,
+        query_folded: &str,
+        scored: &mut Vec<(u32, Vec<[u32; 2]>, u32)>,
+    ) {
+        for pos in 0..self.delta.inserted.len() {
+            let logical = self
+                .base_len()
+                .saturating_add(u32::try_from(pos).unwrap_or(u32::MAX));
+            if self.logical_is_deleted(logical) {
+                continue;
+            }
+            if let Some(name) = self.logical_name(logical) {
+                let is_dir = self.logical_is_dir(logical);
+                if let Some((score, highlight)) = score_name(query_folded, &name, is_dir) {
+                    scored.push((score, highlight, logical));
+                }
+            }
+        }
+    }
+
+    /// Enumerate a directory path.
+    pub fn enumerate(
+        &self,
+        path: &str,
+        query: &str,
+        recursive: bool,
+        limit: usize,
+    ) -> Result<Vec<EsSearchResult>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let root = self.path_to_idx(path)?;
+        let candidates = if recursive {
+            let mut collected = Vec::new();
+            let mut stack: Vec<u32> = self.logical_children(root);
+            while let Some(child) = stack.pop() {
+                collected.push(child);
+                if self.logical_is_dir(child) {
+                    stack.extend(self.logical_children(child));
+                }
+            }
+            collected
+        } else {
+            self.logical_children(root)
+        };
+
+        let query_folded = crate::search::fold::fold_text(query);
+        let mut results = Vec::new();
+        for index in candidates {
+            if self.logical_is_deleted(index) {
+                continue;
+            }
+            let Some(name) = self.logical_name(index) else {
+                continue;
+            };
+            let is_dir = self.logical_is_dir(index);
+            let Some((score, highlight)) = score_name(&query_folded, &name, is_dir) else {
+                continue;
+            };
+            results.push(EsSearchResult {
+                path: self.logical_path(index)?,
+                name,
+                is_directory: is_dir,
+                score,
+                highlight,
+            });
+        }
+        sort_and_limit(&mut results, limit);
+        Ok(results)
+    }
+
+    /// Resolve a normalized path to a logical record index.
+    pub fn path_to_idx(&self, path: &str) -> Result<u32> {
+        let normalized = normalize_path_for_lookup(path);
+        let normalized_folded = normalized.to_lowercase();
+        for index in 0..self.logical_len() {
+            if self.logical_is_deleted(index) {
+                continue;
+            }
+            let Ok(candidate) = self.logical_path(index) else {
+                continue;
+            };
+            if candidate.to_lowercase() == normalized_folded {
+                return Ok(index);
+            }
+        }
+        Err(EsError::PathNotFound { path: normalized })
+    }
+
+    /// Apply a batch of USN-derived events to the delta overlay.
+    pub fn apply_events(&mut self, events: &[EsUsnEvent]) {
+        for event in events {
+            match event.kind {
+                EsUsnEventKind::Delete => self.apply_delete(event.file_ref),
+                EsUsnEventKind::Create => self.apply_create(event),
+                EsUsnEventKind::Rename | EsUsnEventKind::Move => self.apply_rename_move(event),
+                EsUsnEventKind::Metadata => {}
+            }
+        }
+    }
+
+    fn apply_delete(&mut self, file_ref: u64) {
+        if let Some(index) = self.file_ref_map.get(file_ref) {
+            self.delta.deleted.insert(index);
+            self.file_ref_map.remove(file_ref);
+        }
+    }
+
+    fn apply_create(&mut self, event: &EsUsnEvent) {
+        let Some(name) = event.name.clone() else {
+            return;
+        };
+        if name.is_empty() {
+            return;
+        }
+        let parent_ref = event.parent_ref.unwrap_or(0);
+        let flags = event.flags.unwrap_or(0);
+        let logical = self.logical_len();
+        self.delta.inserted.push(InsertedRecord {
+            file_ref: event.file_ref,
+            parent_ref,
+            name,
+            flags,
+        });
+        self.delta.deleted.remove(&logical);
+        self.file_ref_map.insert(event.file_ref, logical);
+    }
+
+    fn apply_rename_move(&mut self, event: &EsUsnEvent) {
+        let Some(index) = self.file_ref_map.get(event.file_ref) else {
+            self.apply_create(event);
+            return;
+        };
+        if let Some(name) = &event.name {
+            if !name.is_empty() {
+                self.set_logical_name(index, name.clone());
+            }
+        }
+        if let Some(parent_ref) = event.parent_ref {
+            if let Some(new_parent) = self.file_ref_map.get(parent_ref) {
+                self.set_logical_parent(index, new_parent);
+            }
+        }
+    }
+
+    fn set_logical_name(&mut self, index: u32, name: String) {
+        if index < self.base_len() {
+            self.delta.renamed.insert(index, name);
+        } else if let Some(pos) = index.checked_sub(self.base_len()) {
+            if let Some(rec) = self
+                .delta
+                .inserted
+                .get_mut(usize::try_from(pos).unwrap_or(usize::MAX))
+            {
+                rec.name = name;
+            }
+        }
+    }
+
+    fn set_logical_parent(&mut self, index: u32, parent: u32) {
+        self.delta.moved.insert(index, parent);
+    }
+}
+
+/// Bounded insert: keep at most `cap` entries, dropping the lowest-scored.
+fn insert_top_n(
+    heap: &mut Vec<(u32, Vec<[u32; 2]>, u32)>,
+    entry: (u32, Vec<[u32; 2]>, u32),
+    cap: usize,
+) {
+    if heap.len() < cap {
+        heap.push(entry);
+    } else if let Some(min) = heap.iter().map(|(s, _, _)| *s).min() {
+        if entry.0 > min {
+            if let Some(pos) = heap.iter().position(|(s, _, _)| *s == min) {
+                heap[pos] = entry;
+            }
+        }
+    }
+}
+
+fn sort_and_limit(results: &mut Vec<EsSearchResult>, limit: usize) {
+    results.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.path.to_lowercase().cmp(&right.path.to_lowercase()))
+    });
+    results.truncate(limit);
+}
+
+fn join_path_parts(parts: &[String]) -> String {
+    if let Some(root) = parts.first() {
+        if crate::path::is_drive_prefix(root) {
+            let mut path = root.to_ascii_uppercase();
+            path.push('\\');
+            for part in parts.iter().skip(1) {
+                if !path.ends_with('\\') {
+                    path.push('\\');
+                }
+                path.push_str(part);
+            }
+            return path;
+        }
+    }
+    parts.join(r"\")
+}
+
+/// Build a lookup map from child index to parent index.
+#[must_use]
+pub fn parent_map(records: &[EsRecord]) -> BTreeMap<u32, u32> {
+    records
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, record)| {
+            if record.parent_idx == PARENT_NONE {
+                None
+            } else {
+                u32::try_from(idx)
+                    .ok()
+                    .map(|record_idx| (record_idx, record.parent_idx))
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::builder::EsIndexBuilder;
+    use crate::record::flags;
+
+    #[test]
+    fn path_from_idx_deep() {
+        let mut builder = EsIndexBuilder::new();
+        let root = builder
+            .add_record(5, u32::MAX, "C:", flags::DIRECTORY, 0)
+            .unwrap();
+        let users = builder
+            .add_record(6, root, "Users", flags::DIRECTORY, 1)
+            .unwrap();
+        let file = builder.add_record(7, users, "note.txt", 0, 2).unwrap();
+        let index = builder.finish().unwrap();
+        assert_eq!(index.path_from_idx(file).unwrap(), r"C:\Users\note.txt");
+    }
+
+    #[test]
+    fn children_enumeration() {
+        let mut builder = EsIndexBuilder::new();
+        let root = builder
+            .add_record(5, u32::MAX, "C:", flags::DIRECTORY, 0)
+            .unwrap();
+        let child = builder
+            .add_record(6, root, "Users", flags::DIRECTORY, 1)
+            .unwrap();
+        let index = builder.finish().unwrap();
+        assert_eq!(index.children(root).unwrap(), &[child]);
+    }
+}
