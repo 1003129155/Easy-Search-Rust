@@ -1,5 +1,13 @@
 # EasySearch
 
+## Acknowledgments / 代码参考
+
+The MFT reading, USN journal, and pipe security modules (`easysearch-mft`, `easysearch-security`, `uffs-polars`, `uffs-text`) are derived from the [UltraFastFileSearch](https://github.com/skyllc-ai/UltraFastFileSearch) project by SKY, LLC (MPL-2.0 license). These modules provide the low-level NTFS MFT parsing, USN change journal integration, Polars DataFrame facade, and Windows named-pipe DACL helpers that EasySearch builds upon.
+
+Original repository: https://github.com/skyllc-ai/UltraFastFileSearch  
+Original license: MPL-2.0  
+Original author: Robert Nio / SKY, LLC
+
 A fast Windows file search engine that indexes NTFS volumes via MFT parsing and keeps the index live through USN journal polling.
 
 ## Architecture
