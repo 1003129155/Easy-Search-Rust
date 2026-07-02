@@ -6,7 +6,7 @@ name = "easysearch-security"
 # `easysearch_security` automatically for external consumers.
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "MPL-2.0"
 publish = false
 
 [lib]

@@ -729,7 +729,8 @@ impl MftReader {
         index.sort_directory_children();
 
         // Compute tree metrics
-        index.compute_tree_metrics();
+        // EasySearch: skipped — EsRecord does not use tree metrics
+        // index.compute_tree_metrics();
 
         let parse_time = parse_start.elapsed();
 

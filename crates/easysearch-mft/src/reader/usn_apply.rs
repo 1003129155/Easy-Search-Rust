@@ -254,7 +254,8 @@ pub(super) fn rebuild_derived_after_usn(
         debug!(drive = %drive, "🔨 Rebuilding extension index after USN updates");
         index.build_extension_index();
         debug!(drive = %drive, "🔨 Recomputing tree metrics after USN updates");
-        index.compute_tree_metrics();
+        // EasySearch: skipped — EsRecord does not use tree metrics
+        // index.compute_tree_metrics();
     }
 
     info!(

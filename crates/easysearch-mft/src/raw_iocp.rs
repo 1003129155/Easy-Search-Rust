@@ -631,7 +631,8 @@ pub fn load_iocp_to_index<P: AsRef<Path>>(path: P) -> Result<crate::index::MftIn
         "[PARITY_TRACE] CALLING compute_tree_metrics()"
     );
     let tree_start = std::time::Instant::now();
-    index.compute_tree_metrics();
+    // EasySearch: skipped — EsRecord does not use tree metrics
+    // index.compute_tree_metrics();
     let tree_ms = tree_start.elapsed().as_millis();
     debug!(
         tree_metrics_ms = tree_ms,

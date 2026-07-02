@@ -674,7 +674,8 @@ impl MftIndex {
         let tree_ms = if version < 3 {
             tracing::debug!("Old index version {version} - recomputing tree metrics");
             let t_tree = std::time::Instant::now();
-            index.compute_tree_metrics();
+            // EasySearch: skipped — EsRecord does not use tree metrics
+            // index.compute_tree_metrics();
             t_tree.elapsed().as_millis()
         } else {
             0

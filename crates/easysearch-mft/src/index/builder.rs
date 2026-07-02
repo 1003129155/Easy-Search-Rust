@@ -453,7 +453,8 @@ impl MftIndex {
         // 3. Compute tree metrics for directory statistics (Phase 5)
         // Must run AFTER sorting in OFFLINE path for deterministic results.
         tracing::debug!("[TRIP] MftIndex::from_parsed_records -> Phase 5: compute_tree_metrics");
-        index.compute_tree_metrics();
+        // EasySearch: skipped — EsRecord does not use tree metrics
+        // index.compute_tree_metrics();
 
         // 4. Build extension index eagerly for O(matches) filtered queries.
         index.build_extension_index();
@@ -513,7 +514,8 @@ impl MftIndex {
 
         // Now time just the tree metrics computation
         let tree_start = Instant::now();
-        index.compute_tree_metrics();
+        // EasySearch: skipped — EsRecord does not use tree metrics
+        // index.compute_tree_metrics();
         let tree_metrics_ms = u64::try_from(tree_start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         let total_ms = u64::try_from(total_start.elapsed().as_millis()).unwrap_or(u64::MAX);

@@ -730,7 +730,8 @@ impl MftReader {
                             "[PARITY_TRACE] SlidingIocpInline: CALLING compute_tree_metrics()"
                         );
                         let tree_start = Instant::now();
-                        index.compute_tree_metrics();
+                        // EasySearch: skipped — EsRecord does not use tree metrics
+                        // index.compute_tree_metrics();
                         debug!(
                             tree_metrics_ms = tree_start.elapsed().as_millis(),
                             "[PARITY_TRACE] SlidingIocpInline: compute_tree_metrics() done"

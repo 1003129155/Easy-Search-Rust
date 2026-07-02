@@ -71,7 +71,8 @@ impl MftIndex {
         self.sort_directory_children();
 
         debug!("🔨 Computing tree metrics...");
-        self.compute_tree_metrics();
+        // EasySearch: skipped — EsRecord does not use tree metrics
+        // self.compute_tree_metrics();
 
         debug!("✅ Post-processing complete");
     }
