@@ -23,8 +23,8 @@ pub(crate) struct PollResult {
 /// simply retries on the next tick).
 #[cfg(windows)]
 pub(crate) fn poll_drive(drive_letter: char, last_usn: i64) -> Option<PollResult> {
-    use easysearch_mft::platform::DriveLetter;
-    use easysearch_mft::usn::{Usn, query_usn_journal, read_usn_journal};
+    use uffs_mft::platform::DriveLetter;
+    use uffs_mft::usn::{Usn, query_usn_journal, read_usn_journal};
 
     let drive = DriveLetter::parse(drive_letter).ok()?;
     let info = query_usn_journal(drive).ok()?;
@@ -48,11 +48,11 @@ pub(crate) fn poll_drive(_drive_letter: char, _last_usn: i64) -> Option<PollResu
 
 /// Convert aggregated USN records into events.
 #[cfg(windows)]
-fn convert_records(records: &[easysearch_mft::usn::UsnRecord]) -> Vec<EsUsnEvent> {
+fn convert_records(records: &[uffs_mft::usn::UsnRecord]) -> Vec<EsUsnEvent> {
     use std::collections::HashMap;
 
     use easysearch_core::usn::EsUsnEventKind;
-    use easysearch_mft::usn::aggregate_changes;
+    use uffs_mft::usn::aggregate_changes;
 
     let mut attributes: HashMap<u64, u32> = HashMap::new();
     for record in records {

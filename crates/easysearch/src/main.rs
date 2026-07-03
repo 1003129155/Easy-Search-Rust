@@ -1,5 +1,9 @@
 // Copyright (c) 2025-2026 LIJIALU. MIT License.
 
+// Windowsサブシステム指定: コンソールウィンドウを表示しない
+// (daemon モードで黒い CMD ウィンドウが出ないようにする)
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 //! EasySearch backend daemon entrypoint.
 //!
 //! On Windows the daemon runs as a named-pipe server so clients can
@@ -11,6 +15,7 @@
 //! asynchronously (so the pipe/loop is responsive and `status` can report
 //! `indexing`), then polls the USN journal to apply incremental changes.
 
+mod cli;
 mod config;
 mod drive_manager;
 mod error;
@@ -31,7 +36,24 @@ use service::EsService;
 const POLL_INTERVAL: Duration = Duration::from_millis(1000);
 
 fn main() -> Result<(), EsError> {
+    // CLI モード判定: コマンドライン引数があれば CLI クライアントとして動作する
+    if let Some(args) = cli::CliArgs::parse() {
+        if let Err(e) = cli::run(args) {
+            eprintln!("[easysearch] {e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    // Daemon モード
     let config = EsConfig::from_env();
+
+    // 重複起動防止: pipe が既に存在する場合は別の daemon が動いているので即座に終了
+    if is_pipe_already_taken(&config.pipe_name) {
+        eprintln!("[easysearch] daemon already running (pipe exists), exiting.");
+        return Ok(());
+    }
+
     let service = Arc::new(Mutex::new(EsService::new(config.clone())));
 
     spawn_index_worker(Arc::clone(&service), config.clone());
@@ -132,4 +154,14 @@ fn run_stdio(service: &Arc<Mutex<EsService>>) -> Result<(), EsError> {
     }
 
     Ok(())
+}
+
+/// 指定された pipe name が既に別プロセスに占有されているかチェックする。
+/// 接続できれば既存 daemon が動いている → true を返す。
+fn is_pipe_already_taken(pipe_name: &str) -> bool {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(pipe_name)
+        .is_ok()
 }

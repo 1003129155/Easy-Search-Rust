@@ -112,8 +112,8 @@ pub(crate) fn build_index(
 #[cfg(windows)]
 fn build_index_windows(letter: char, cache_dir: Option<&Path>) -> Result<EsIndex, String> {
     use easysearch_core::cache::{read_flow_cache, write_flow_cache};
-    use easysearch_mft::platform::DriveLetter;
-    use easysearch_mft::usn::query_usn_journal;
+    use uffs_mft::platform::DriveLetter;
+    use uffs_mft::usn::query_usn_journal;
 
     let drive = DriveLetter::parse(letter).map_err(|e| e.to_string())?;
 
@@ -174,11 +174,11 @@ fn build_index_windows(letter: char, cache_dir: Option<&Path>) -> Result<EsIndex
 /// This is the MFT bridge logic, moved from flow-core into the daemon.
 #[cfg(windows)]
 fn build_index_from_live_mft(drive_letter: char) -> Result<EsIndex, String> {
-    use easysearch_mft::platform::DriveLetter;
+    use uffs_mft::platform::DriveLetter;
 
     let letter = DriveLetter::parse(drive_letter).map_err(|err| err.to_string())?;
 
-    let reader = easysearch_mft::MftReader::open(letter).map_err(|err| err.to_string())?;
+    let reader = uffs_mft::MftReader::open(letter).map_err(|err| err.to_string())?;
 
     let mft_index = reader
         .read_all_index_sync()
@@ -189,12 +189,12 @@ fn build_index_from_live_mft(drive_letter: char) -> Result<EsIndex, String> {
 
 #[cfg(windows)]
 fn build_index_from_mft_index(
-    mft_index: &easysearch_mft::index::MftIndex,
+    mft_index: &uffs_mft::index::MftIndex,
     drive_letter: char,
 ) -> Result<EsIndex, String> {
     use easysearch_core::builder::EsIndexBuilder;
     use easysearch_core::record::flags as es_flags;
-    use easysearch_mft::index::{NO_ENTRY, ROOT_FRS};
+    use uffs_mft::index::{NO_ENTRY, ROOT_FRS};
 
     let drive_upper = drive_letter.to_ascii_uppercase();
 

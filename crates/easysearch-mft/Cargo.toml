@@ -5,6 +5,16 @@ edition = "2024"
 license = "MPL-2.0"
 publish = false
 
+[lib]
+# Named uffs_mft so copied code (`use uffs_mft::...`) works unchanged.
+# The crate is named easysearch-mft but the source uses `uffs_mft` internally.
+name = "uffs_mft"
+path = "src/lib.rs"
+
+[[bin]]
+name = "easysearch-mft"
+path = "src/main.rs"
+
 # The source code uses `use uffs_polars`, `use uffs_text`, `use uffs_security`.
 # We alias the dependencies so the code compiles without renaming 6000+ lines.
 [dependencies]
@@ -60,3 +70,10 @@ libc = "0.2"
 all = "allow"
 pedantic = "allow"
 nursery = "allow"
+
+[dev-dependencies]
+criterion = "0.5"
+hex = "0.4"
+proptest = "1"
+sha2 = "0.10"
+tempfile = "3"

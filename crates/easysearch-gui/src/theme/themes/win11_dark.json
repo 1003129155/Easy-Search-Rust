@@ -1,0 +1,19 @@
+{
+    "name": "Win11 Dark",
+    "is_dark": true,
+    "has_blur": true,
+    "colors": {
+        "background": "#D6202020",
+        "search_bg": "#00202020",
+        "text_primary": "#E3E0E3",
+        "text_secondary": "#D9D9D4",
+        "selected_bg": "#19C8C8C8",
+        "accent": "#60CDFF",
+        "separator": "#1EFFFFFF",
+        "placeholder": "#8F8F8F",
+        "border": "#28FFFFFF",
+        "hotkey_bg": "#138A8A8A",
+        "hotkey_text": "#8F8F8F",
+        "selection": "#5060CDFF"
+    }
+}

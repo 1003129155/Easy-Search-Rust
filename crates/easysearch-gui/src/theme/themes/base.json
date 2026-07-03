@@ -1,0 +1,19 @@
+{
+    "name": "Base",
+    "is_dark": false,
+    "has_blur": false,
+    "colors": {
+        "background": "#FCFCFC",
+        "search_bg": "#FCFCFC",
+        "text_primary": "#202020",
+        "text_secondary": "#606060",
+        "selected_bg": "#0F000000",
+        "accent": "#0067C0",
+        "separator": "#14000000",
+        "placeholder": "#969696",
+        "border": "#1E000000",
+        "hotkey_bg": "#0C000000",
+        "hotkey_text": "#606060",
+        "selection": "#3C0067C0"
+    }
+}

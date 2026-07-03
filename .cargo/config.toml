@@ -1,5 +1,5 @@
 [build]
-rustc-wrapper = "sccache"
+# rustc-wrapper = "sccache"  # TEMP: disabled (sccache 未インストール)
 
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-cpu=native"]

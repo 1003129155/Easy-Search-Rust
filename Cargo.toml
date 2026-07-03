@@ -2,11 +2,24 @@
 resolver = "3"
 members = [
     "crates/easysearch-core",
+    "crates/easysearch-engine",
     "crates/easysearch",
     "crates/easysearch-mft",
     "crates/easysearch-security",
+    "crates/easysearch-gui",
     "crates/uffs-polars",
     "crates/uffs-text",
+    # Plugins
+    "crates/plugins/plugin-calculator",
+    "crates/plugins/plugin-url",
+    "crates/plugins/plugin-web-search",
+    "crates/plugins/plugin-bookmark",
+    "crates/plugins/plugin-program",
+    "crates/plugins/plugin-sys-cmd",
+    "crates/plugins/plugin-shell",
+    "crates/plugins/plugin-process-killer",
+    "crates/plugins/plugin-win-settings",
+    "crates/plugins/plugin-file-search",
 ]
 
 [workspace.package]

@@ -1,0 +1,19 @@
+{
+    "name": "Win11 Light",
+    "is_dark": false,
+    "has_blur": true,
+    "colors": {
+        "background": "#E6FAFAFA",
+        "search_bg": "#00FAFAFA",
+        "text_primary": "#1E1E1E",
+        "text_secondary": "#646464",
+        "selected_bg": "#140063B1",
+        "accent": "#0063B1",
+        "separator": "#14000000",
+        "placeholder": "#8C8C8C",
+        "border": "#1E000000",
+        "hotkey_bg": "#138A8A8A",
+        "hotkey_text": "#646464",
+        "selection": "#500063B1"
+    }
+}

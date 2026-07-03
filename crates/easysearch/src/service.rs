@@ -109,8 +109,12 @@ impl EsService {
     }
 
     fn search(&self, request: Request) -> Response {
-        let query = request.query.unwrap_or_default();
+        let raw_query = request.query.unwrap_or_default();
         let limit = request.limit.unwrap_or(100);
+
+        // クエリパターンを正規化する（glob → 子文字列変換）
+        let query = normalize_query(&raw_query);
+
         let items: Vec<ResponseItem> = self
             .drives
             .indexes()
@@ -224,4 +228,51 @@ impl EsService {
             error: None,
         }
     }
+}
+
+
+/// Everything 互換のクエリパターンをエンジンの子文字列検索形式に変換する。
+///
+/// - `*.txt`     → `.txt`（拡張子マッチ）
+/// - `readme`    → `readme`（子文字列マッチ、そのまま）
+/// - `>regex`    → `regex`（正規表現プレフィクスを除去、子文字列として扱う）
+/// - `*`         → ``（全件取得）
+/// - `foo*.bar`  → `foo`（最初の非ワイルドカード部分）
+fn normalize_query(raw: &str) -> String {
+    let trimmed = raw.trim();
+
+    if trimmed.is_empty() || trimmed == "*" {
+        return String::new();
+    }
+
+    // 正規表現プレフィクス ">" を除去（子文字列検索にフォールバック）
+    if let Some(rest) = trimmed.strip_prefix('>') {
+        // 単純な正規表現パターン（例: `\.log$`）→ 拡張子部分を抽出
+        let cleaned = rest
+            .trim_start_matches('\\')
+            .trim_start_matches('.')
+            .trim_end_matches('$');
+        if !cleaned.is_empty() {
+            return format!(".{cleaned}");
+        }
+        return String::new();
+    }
+
+    // `*.ext` パターン → `.ext`
+    if let Some(ext) = trimmed.strip_prefix("*.") {
+        if !ext.contains('*') && !ext.contains('?') {
+            return format!(".{ext}");
+        }
+    }
+
+    // 先頭・末尾のワイルドカードを除去
+    let s = trimmed.trim_start_matches('*').trim_end_matches('*');
+
+    // 中間のワイルドカードがある場合、最長の非ワイルドカード部分を使う
+    if s.contains('*') || s.contains('?') {
+        let parts: Vec<&str> = s.split(&['*', '?'][..]).filter(|p| !p.is_empty()).collect();
+        return parts.iter().max_by_key(|p| p.len()).unwrap_or(&"").to_string();
+    }
+
+    s.to_string()
 }
