@@ -1487,13 +1487,20 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 name = "easysearch"
 version = "0.1.0"
 dependencies = [
+ "dirs 6.0.0",
  "easysearch-core",
- "easysearch-mft",
- "easysearch-security",
+ "easysearch-engine",
+ "iced",
+ "plugin-bookmark",
+ "plugin-file-search",
+ "plugin-indicator",
+ "plugin-program",
+ "plugin-sys-cmd",
+ "plugin-win-settings",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "windows 0.62.2",
+ "windows-numerics 0.3.1",
 ]
 
 [[package]]
@@ -1513,30 +1520,6 @@ dependencies = [
  "easysearch-mft",
  "easysearch-security",
  "windows 0.62.2",
-]
-
-[[package]]
-name = "easysearch-gui"
-version = "0.1.0"
-dependencies = [
- "dirs 6.0.0",
- "easysearch-core",
- "easysearch-engine",
- "iced",
- "plugin-bookmark",
- "plugin-calculator",
- "plugin-file-search",
- "plugin-process-killer",
- "plugin-program",
- "plugin-shell",
- "plugin-sys-cmd",
- "plugin-url",
- "plugin-web-search",
- "plugin-win-settings",
- "serde",
- "serde_json",
- "windows 0.62.2",
- "windows-numerics 0.3.1",
 ]
 
 [[package]]
@@ -3919,15 +3902,10 @@ dependencies = [
 name = "plugin-bookmark"
 version = "0.1.0"
 dependencies = [
+ "dirs 6.0.0",
  "easysearch-core",
+ "serde",
  "serde_json",
-]
-
-[[package]]
-name = "plugin-calculator"
-version = "0.1.0"
-dependencies = [
- "easysearch-core",
 ]
 
 [[package]]
@@ -3939,24 +3917,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "plugin-process-killer"
+name = "plugin-indicator"
 version = "0.1.0"
 dependencies = [
  "easysearch-core",
- "serde",
- "serde_json",
- "windows 0.62.2",
 ]
 
 [[package]]
 name = "plugin-program"
-version = "0.1.0"
-dependencies = [
- "easysearch-core",
-]
-
-[[package]]
-name = "plugin-shell"
 version = "0.1.0"
 dependencies = [
  "dirs 6.0.0",
@@ -3970,20 +3938,8 @@ name = "plugin-sys-cmd"
 version = "0.1.0"
 dependencies = [
  "easysearch-core",
-]
-
-[[package]]
-name = "plugin-url"
-version = "0.1.0"
-dependencies = [
- "easysearch-core",
-]
-
-[[package]]
-name = "plugin-web-search"
-version = "0.1.0"
-dependencies = [
- "easysearch-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3991,6 +3947,8 @@ name = "plugin-win-settings"
 version = "0.1.0"
 dependencies = [
  "easysearch-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

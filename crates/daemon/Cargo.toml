@@ -1,0 +1,26 @@
+[package]
+name = "easysearch-daemon"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "easysearch-daemon"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+easysearch-core = { path = "../core" }
+
+[target.'cfg(windows)'.dependencies]
+easysearch-mft = { path = "../mft" }
+uffs-security = { package = "easysearch-security", path = "../security" }
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+] }

@@ -1,0 +1,77 @@
+[package]
+name = "easysearch-mft"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+publish = false
+
+[lib]
+# Named uffs_mft so copied code (`use uffs_mft::...`) works unchanged.
+# The crate is named easysearch-mft but the source uses `uffs_mft` internally.
+name = "uffs_mft"
+path = "src/lib.rs"
+
+# [[bin]] 已移除 — easysearch-mft 仅作为 lib 供 engine 使用
+
+# The source code uses `use uffs_polars`, `use uffs_text`, `use uffs_security`.
+# We alias the dependencies so the code compiles without renaming 6000+ lines.
+[dependencies]
+uffs-polars = { path = "../../_unused/uffs-polars" }
+uffs-text = { path = "../../_unused/uffs-text" }
+uffs-security = { package = "easysearch-security", path = "../security" }
+
+bitflags = "2"
+smallvec = "1"
+bytemuck = { version = "1", features = ["derive"] }
+zerocopy = { version = "0.8", features = ["derive"] }
+rustc-hash = "2"
+thiserror = "2"
+anyhow = "1"
+rayon = "1"
+crossbeam-channel = "0.5"
+zstd = { version = "0.13", features = ["zstdmt"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "io-util", "time", "macros", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "time"] }
+tracing-appender = "0.2"
+dirs-next = "2"
+chrono = { version = "0.4", features = ["serde"] }
+hostname = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.18"
+rand = "0.10"
+rand_chacha = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Pipes",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Suppress the strict lints from copied code
+[lints.clippy]
+all = "allow"
+pedantic = "allow"
+nursery = "allow"
+
+[dev-dependencies]
+criterion = "0.5"
+hex = "0.4"
+proptest = "1"
+sha2 = "0.10"
+tempfile = "3"

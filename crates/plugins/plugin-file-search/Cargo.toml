@@ -6,5 +6,5 @@ license = "MIT"
 publish = false
 
 [dependencies]
-easysearch-core = { path = "../../easysearch-core" }
-easysearch-engine = { path = "../../easysearch-engine" }
+easysearch-core = { path = "../../core" }
+easysearch-engine = { path = "../../engine" }

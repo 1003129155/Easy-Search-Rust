@@ -1,25 +1,26 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/easysearch-core",
-    "crates/easysearch-engine",
-    "crates/easysearch",
-    "crates/easysearch-mft",
-    "crates/easysearch-security",
-    "crates/easysearch-gui",
-    "crates/uffs-polars",
-    "crates/uffs-text",
-    # Plugins
-    "crates/plugins/plugin-calculator",
-    "crates/plugins/plugin-url",
-    "crates/plugins/plugin-web-search",
+    # ── 核心库 ──
+    "crates/core",              # 索引/缓存/搜索算法
+    "crates/engine",            # 嵌入式搜索引擎（多盘符、USN、事件通道）
+    "crates/mft",               # NTFS MFT/USN 底层解析
+    "crates/security",          # 安全模块（ACL/AES-GCM/Authenticode）
+
+    # ── 二进制 ──
+    "crates/app",               # ★ 主程序（前后端一体化单 exe，产物名: easysearch.exe）
+    # "crates/daemon",          # 独立守护进程（已废弃，功能已内嵌到 app）
+
+    # 注: _unused/uffs-polars 和 _unused/uffs-text 是 mft crate 的内部路径依赖，
+    # 不作为 workspace 成员。它们是从 UFFS 项目移植的代码，保留原名以避免改动 6000+ 行 use 语句。
+
+    # ── 插件 ──
     "crates/plugins/plugin-bookmark",
     "crates/plugins/plugin-program",
     "crates/plugins/plugin-sys-cmd",
-    "crates/plugins/plugin-shell",
-    "crates/plugins/plugin-process-killer",
     "crates/plugins/plugin-win-settings",
     "crates/plugins/plugin-file-search",
+    "crates/plugins/plugin-indicator",
 ]
 
 [workspace.package]
@@ -28,3 +29,9 @@ edition = "2024"
 license = "MIT"
 authors = ["LIJIALU"]
 publish = false
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+panic = "abort"
