@@ -50,6 +50,8 @@ pub struct DisplayItem {
     pub is_directory: bool,
     /// Highlight ranges in the title as `[start_byte, len_bytes]`.
     pub highlight: Vec<[u32; 2]>,
+    /// Score for unified ranking (higher = shown first).
+    pub score: u32,
 }
 
 /// Renderer state holding D2D and DWrite resources.

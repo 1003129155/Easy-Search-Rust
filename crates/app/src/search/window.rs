@@ -415,18 +415,16 @@ fn search_thread_main(
                     icon_path: Some(path_clone),
                     is_directory: is_dir,
                     highlight,
+                    score: r.score,
                 }
             })
             .collect();
 
-        // Apply history frequency boost: sort items that have been used more often higher
-        items.sort_by(|a, b| {
-            let key_a = action_to_history_key_static(&a.action);
-            let key_b = action_to_history_key_static(&b.action);
-            let boost_a = history.boost_score(&key_a);
-            let boost_b = history.boost_score(&key_b);
-            boost_b.cmp(&boost_a) // Higher boost = higher position
-        });
+        // Apply history frequency boost to file result scores
+        for item in &mut items {
+            let key = action_to_history_key_static(&item.action);
+            item.score += history.boost_score(&key);
+        }
 
         let boxed = Box::new(SearchResponse {
             items,
@@ -487,6 +485,7 @@ fn build_home_hints(router: &Router) -> Vec<DisplayItem> {
                 icon_path: None,
                 is_directory: false,
                 highlight: Vec::new(),
+                score: 100,
             }
         })
         .collect()
@@ -793,9 +792,20 @@ unsafe extern "system" fn wnd_proc(
                     if let Some(ref mut app) = *s {
                         // Only accept results matching current seq_id
                         if response.seq_id == app.current_search_seq {
-                            // Merge: plugin items first, then file search results
+                            // Merge plugin + file results and sort by unified score
                             let mut all_items = app.plugin_items.clone();
                             all_items.extend(response.items);
+                            all_items.sort_by(|a, b| b.score.cmp(&a.score));
+
+                            // Reassign shortcut labels based on final position
+                            for (i, item) in all_items.iter_mut().enumerate() {
+                                item.shortcut = if i < 9 {
+                                    format!("Alt+{}", i + 1)
+                                } else {
+                                    String::new()
+                                };
+                            }
+
                             app.items = all_items;
                             app.anim_frame = 0;
                             unsafe {
@@ -1108,6 +1118,7 @@ fn on_input_changed(app: &mut AppState) {
                 },
                 is_directory: false,
                 highlight: Vec::new(),
+                score: r.score,
             })
             .collect();
         app.items = app.plugin_items.clone();
