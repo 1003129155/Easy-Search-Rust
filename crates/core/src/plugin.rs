@@ -4,6 +4,9 @@
 //!
 //! Defines the [`Plugin`] trait and common types shared by all plugins.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 /// A single result item produced by a plugin.
@@ -74,6 +77,9 @@ pub trait Plugin: Send + Sync {
 
     /// Produce results for the given query.
     /// For keyword-triggered plugins, `query` has the keyword stripped.
+    ///
+    /// For plugins that return `true` from `needs_background()`, this method
+    /// will be called from a background thread, not the UI thread.
     fn query(&self, query: &str) -> Vec<PluginResult>;
 
     /// Human-readable name of this plugin.
@@ -89,10 +95,26 @@ pub trait Plugin: Send + Sync {
         "plugin"
     }
 
+    /// Whether this plugin's `query()` may block and should be run on a
+    /// background thread. Default is `false` for fast in-memory plugins.
+    ///
+    /// Set to `true` for plugins that do I/O-heavy work (e.g. file search
+    /// against an MFT index, network requests, etc.).
+    fn needs_background(&self) -> bool {
+        false
+    }
+
     /// Settings schema — defines what options this plugin exposes in the settings UI.
     /// Return `None` if the plugin has no configurable settings.
     fn settings_schema(&self) -> Option<Vec<SettingItem>> {
         None
+    }
+
+    /// Plugin priority for result ranking. Higher priority plugins get their
+    /// scores boosted by `priority * 150` (same formula as FlowLauncher).
+    /// Default is 0 (no boost). Range: -10 to 10 recommended.
+    fn priority(&self) -> i32 {
+        0
     }
 
     /// Called when a setting value changes from the UI.
@@ -147,9 +169,13 @@ pub struct Router {
     plugins: Vec<PluginSlot>,
 }
 
+/// Cancellation token for background plugin queries.
+/// Set to `true` to signal the background thread to abort early.
+pub type CancelToken = Arc<AtomicBool>;
+
 /// A registered plugin with its runtime-configurable keyword.
 struct PluginSlot {
-    plugin: Box<dyn Plugin>,
+    plugin: Arc<dyn Plugin>,
     /// Runtime keyword override. `None` means use `plugin.default_keyword()`.
     keyword_override: Option<Option<String>>,
     /// Whether this plugin is enabled.
@@ -176,7 +202,7 @@ impl Router {
     /// Register a plugin with the router (uses default keyword).
     pub fn register(&mut self, plugin: Box<dyn Plugin>) {
         self.plugins.push(PluginSlot {
-            plugin,
+            plugin: Arc::from(plugin),
             keyword_override: None,
             enabled: true,
         });
@@ -198,10 +224,15 @@ impl Router {
     }
 
     /// Get a mutable reference to a plugin by name (for settings changes).
+    /// Only succeeds when the plugin is uniquely owned (no other Arc references).
     pub fn plugin_mut(&mut self, name: &str) -> Option<&mut dyn Plugin> {
         for slot in &mut self.plugins {
             if slot.plugin.name() == name {
-                return Some(slot.plugin.as_mut());
+                // SAFETY: Arc::get_mut returns a reference tied to the Arc's
+                // lifetime. Since we have &mut self, we know no other references
+                // to the plugin exist. The 'static bound is satisfied because
+                // the Arc keeps the plugin alive.
+                return Arc::get_mut(&mut slot.plugin).map(|p| p as &mut dyn Plugin);
             }
         }
         None
@@ -222,8 +253,10 @@ impl Router {
             .collect()
     }
 
-    /// Route a query to matching plugins and collect results.
-    pub fn query(&self, raw_query: &str) -> Vec<PluginResult> {
+    /// Route a query to matching plugins and collect results from fast
+    /// (non-background) plugins. Background plugins are skipped — use
+    /// [`query_background`](Self::query_background) for those.
+    pub fn query_immediate(&self, raw_query: &str) -> Vec<PluginResult> {
         let mut results = Vec::new();
         let query_trimmed = raw_query.trim();
 
@@ -234,23 +267,17 @@ impl Router {
         let mut keyword_matched = false;
 
         for slot in &self.plugins {
-            if !slot.enabled {
+            if !slot.enabled || slot.plugin.needs_background() {
                 continue;
             }
 
             if let Some(kw) = slot.effective_keyword() {
-                // Match when query equals keyword exactly, or starts with
-                // keyword followed by a space. This prevents "browser" from
-                // triggering keyword "b".
                 let kw_trimmed = kw.trim_end();
                 let query_after_kw = if kw.ends_with(' ') {
-                    // Legacy keywords with trailing space: use strip_prefix as before
                     query_trimmed.strip_prefix(kw)
                 } else if query_trimmed == kw_trimmed {
-                    // Exact match (e.g. input "b" matches keyword "b")
                     Some("")
                 } else if let Some(rest) = query_trimmed.strip_prefix(kw_trimmed) {
-                    // Must be followed by a space (e.g. "b github" but not "browser")
                     if rest.starts_with(' ') {
                         Some(rest)
                     } else {
@@ -262,7 +289,12 @@ impl Router {
 
                 if let Some(stripped) = query_after_kw {
                     let stripped = stripped.trim_start();
-                    results.extend(slot.plugin.query(stripped));
+                    let priority_boost = (slot.plugin.priority().max(0) as u32) * 150;
+                    let mut plugin_results = slot.plugin.query(stripped);
+                    for r in &mut plugin_results {
+                        r.score = r.score.saturating_add(priority_boost);
+                    }
+                    results.extend(plugin_results);
                     keyword_matched = true;
                 }
             }
@@ -271,21 +303,200 @@ impl Router {
         // Global plugins only participate when no keyword plugin matched.
         if !keyword_matched {
             for slot in &self.plugins {
-                if !slot.enabled {
+                if !slot.enabled || slot.plugin.needs_background() {
                     continue;
                 }
                 if slot.effective_keyword().is_some() && !slot.plugin.also_global() {
-                    continue; // skip keyword-only plugins in this pass
+                    continue;
                 }
-                if slot.effective_keyword().is_some() && slot.plugin.also_global() {
-                    // Keyword plugin participating globally: pass full query
-                    if slot.plugin.matches(query_trimmed) {
-                        results.extend(slot.plugin.query(query_trimmed));
+                let matches = if slot.effective_keyword().is_some() && slot.plugin.also_global() {
+                    slot.plugin.matches(query_trimmed)
+                } else if slot.effective_keyword().is_none() {
+                    slot.plugin.matches(query_trimmed)
+                } else {
+                    false
+                };
+                if matches {
+                    let priority_boost = (slot.plugin.priority().max(0) as u32) * 150;
+                    let mut plugin_results = slot.plugin.query(query_trimmed);
+                    for r in &mut plugin_results {
+                        r.score = r.score.saturating_add(priority_boost);
                     }
-                } else if slot.effective_keyword().is_none() && slot.plugin.matches(query_trimmed) {
-                    results.extend(slot.plugin.query(query_trimmed));
+                    results.extend(plugin_results);
                 }
             }
+        }
+
+        results.sort_by(|a, b| b.score.cmp(&a.score));
+        results
+    }
+
+    /// Run background (expensive) plugins on a separate thread and return
+    /// results via a channel along with a cancellation token.
+    ///
+    /// The channel will receive one batch of all background plugin results,
+    /// already sorted by score descending. Set the cancel token to `true`
+    /// to abort the thread early (it checks between plugins).
+    ///
+    /// Returns `None` if there are no matching background plugins for this query.
+    pub fn query_background(
+        &self,
+        raw_query: &str,
+    ) -> Option<(std::sync::mpsc::Receiver<Vec<PluginResult>>, CancelToken)> {
+        let query_trimmed = raw_query.trim().to_string();
+        if query_trimmed.is_empty() {
+            return None;
+        }
+
+        // Collect matching background plugins and their stripped queries
+        let mut tasks: Vec<(String, Arc<dyn Plugin>)> = Vec::new();
+        let mut keyword_matched = false;
+
+        for slot in &self.plugins {
+            if !slot.enabled || !slot.plugin.needs_background() {
+                continue;
+            }
+
+            if let Some(kw) = slot.effective_keyword() {
+                let kw_trimmed = kw.trim_end();
+                let query_after_kw = if kw.ends_with(' ') {
+                    query_trimmed.strip_prefix(kw)
+                } else if query_trimmed == kw_trimmed {
+                    Some("")
+                } else if let Some(rest) = query_trimmed.strip_prefix(kw_trimmed) {
+                    if rest.starts_with(' ') {
+                        Some(rest)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(stripped) = query_after_kw {
+                    tasks.push((stripped.trim_start().to_string(), Arc::clone(&slot.plugin)));
+                    keyword_matched = true;
+                }
+            }
+        }
+
+        if !keyword_matched {
+            for slot in &self.plugins {
+                if !slot.enabled || !slot.plugin.needs_background() {
+                    continue;
+                }
+                if slot.effective_keyword().is_some() && !slot.plugin.also_global() {
+                    continue;
+                }
+                let matches = if slot.effective_keyword().is_some() && slot.plugin.also_global() {
+                    slot.plugin.matches(&query_trimmed)
+                } else if slot.effective_keyword().is_none() {
+                    slot.plugin.matches(&query_trimmed)
+                } else {
+                    false
+                };
+                if matches {
+                    tasks.push((query_trimmed.clone(), Arc::clone(&slot.plugin)));
+                }
+            }
+        }
+
+        if tasks.is_empty() {
+            return None;
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_clone = Arc::clone(&cancel);
+
+        std::thread::Builder::new()
+            .name("plugin-background".into())
+            .spawn(move || {
+                let mut all_results = Vec::new();
+                for (stripped_query, plugin) in tasks {
+                    // Check cancellation before each plugin invocation
+                    if cancel_clone.load(Ordering::Relaxed) {
+                        return; // cancelled — drop without sending
+                    }
+                    all_results.extend(plugin.query(&stripped_query));
+                }
+                // Check one more time before the final sort + send
+                if !cancel_clone.load(Ordering::Relaxed) {
+                    all_results.sort_by(|a, b| b.score.cmp(&a.score));
+                    let _ = tx.send(all_results);
+                }
+            })
+            .ok();
+
+        Some((rx, cancel))
+    }
+
+    /// Route a query to matching plugins and collect results (compatibility
+    /// wrapper — calls both immediate and background synchronously).
+    /// Prefer [`query_immediate`] + [`query_background`] for new code.
+    pub fn query(&self, raw_query: &str) -> Vec<PluginResult> {
+        let mut results = self.query_immediate(raw_query);
+
+        // Run background plugins inline (blocking — only for non-UI use)
+        let query_trimmed = raw_query.trim().to_string();
+        if query_trimmed.is_empty() {
+            return results;
+        }
+
+        let mut tasks: Vec<(String, &dyn Plugin)> = Vec::new();
+        let mut keyword_matched = false;
+
+        for slot in &self.plugins {
+            if !slot.enabled || !slot.plugin.needs_background() {
+                continue;
+            }
+
+            if let Some(kw) = slot.effective_keyword() {
+                let kw_trimmed = kw.trim_end();
+                let query_after_kw = if kw.ends_with(' ') {
+                    query_trimmed.strip_prefix(kw)
+                } else if query_trimmed == kw_trimmed {
+                    Some("")
+                } else if let Some(rest) = query_trimmed.strip_prefix(kw_trimmed) {
+                    if rest.starts_with(' ') {
+                        Some(rest)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(stripped) = query_after_kw {
+                    tasks.push((stripped.trim_start().to_string(), slot.plugin.as_ref()));
+                    keyword_matched = true;
+                }
+            }
+        }
+
+        if !keyword_matched {
+            for slot in &self.plugins {
+                if !slot.enabled || !slot.plugin.needs_background() {
+                    continue;
+                }
+                if slot.effective_keyword().is_some() && !slot.plugin.also_global() {
+                    continue;
+                }
+                let matches = if slot.effective_keyword().is_some() && slot.plugin.also_global() {
+                    slot.plugin.matches(&query_trimmed)
+                } else if slot.effective_keyword().is_none() {
+                    slot.plugin.matches(&query_trimmed)
+                } else {
+                    false
+                };
+                if matches {
+                    tasks.push((query_trimmed.clone(), slot.plugin.as_ref()));
+                }
+            }
+        }
+
+        for (stripped_query, plugin) in tasks {
+            results.extend(plugin.query(&stripped_query));
         }
 
         results.sort_by(|a, b| b.score.cmp(&a.score));

@@ -5,8 +5,6 @@
 
 #[cfg(windows)]
 use std::cell::RefCell;
-#[cfg(windows)]
-use std::sync::mpsc;
 
 #[cfg(windows)]
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -48,25 +46,21 @@ use crate::shared::tray;
 #[cfg(windows)]
 use easysearch_core::Router;
 
-/// Custom message: search results returned from search thread.
+/// Custom message: engine event (progress / error) — wparam encodes the event type.
 #[cfg(windows)]
-const WM_SEARCH_RESULT: u32 = WM_APP + 1;
+const WM_ENGINE_EVENT: u32 = WM_APP + 3;
 
 /// Custom message: index build is complete.
 #[cfg(windows)]
 const WM_INDEX_READY: u32 = WM_APP + 2;
 
-/// Custom message: engine event (progress / error) — wparam encodes the event type.
+/// Deferred result poll timer ID.
 #[cfg(windows)]
-const WM_ENGINE_EVENT: u32 = WM_APP + 3;
+const DEFERRED_POLL_TIMER_ID: usize = 100;
 
-/// Debounce timer ID for file search.
+/// Deferred result poll interval in milliseconds.
 #[cfg(windows)]
-const DEBOUNCE_TIMER_ID: usize = 100;
-
-/// Debounce interval in milliseconds.
-#[cfg(windows)]
-const DEBOUNCE_MS: u32 = 150;
+const DEFERRED_POLL_MS: u32 = 50;
 
 /// Animation timer ID for result list fade-in.
 #[cfg(windows)]
@@ -98,18 +92,22 @@ const ENGINE_EVT_DRIVE_ERROR: usize = 3;
 #[cfg(windows)]
 const ENGINE_EVT_ALL_READY: usize = 4;
 
-/// Search request sent to the search thread.
+/// Pending background (deferred) results from plugins like FileSearch.
+/// On drop, the cancel token is set to abort the background thread.
 #[cfg(windows)]
-struct SearchRequest {
-    query: String,
+struct DeferredQuery {
+    rx: std::sync::mpsc::Receiver<Vec<easysearch_core::PluginResult>>,
     seq_id: u64,
+    #[allow(dead_code)]
+    cancel: easysearch_core::CancelToken,
 }
 
-/// Search response returned from the search thread.
 #[cfg(windows)]
-struct SearchResponse {
-    items: Vec<DisplayItem>,
-    seq_id: u64,
+impl Drop for DeferredQuery {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        self.cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 /// Application state stored in thread-local for the window procedure.
@@ -124,10 +122,10 @@ struct AppState {
     plugin_router: Router,
     /// Items from local plugins (shown immediately).
     plugin_items: Vec<DisplayItem>,
+    /// Pending deferred (background) query. Polled via timer.
+    deferred_query: Option<DeferredQuery>,
     /// Current search sequence ID (incremented on each input change).
     current_search_seq: u64,
-    /// Sender to the search thread.
-    search_tx: Option<mpsc::Sender<SearchRequest>>,
     /// Whether the file search index is ready.
     index_ready: bool,
     /// Usage history for frequency-based ranking.
@@ -303,21 +301,10 @@ pub fn run() -> Result<(), String> {
         })
         .ok();
 
-    // Create search channel + spawn search thread
-    let (search_tx, search_rx) = mpsc::channel::<SearchRequest>();
+    // Create engine Arc (shared with FileSearchPlugin via Router)
     let engine_for_search = std::sync::Arc::new(engine);
-    let engine_clone = engine_for_search.clone();
-    let hwnd_raw_for_search = hwnd.0 as usize;
 
-    std::thread::Builder::new()
-        .name("search-worker".to_string())
-        .spawn(move || {
-            let search_hwnd = HWND(hwnd_raw_for_search as *mut _);
-            search_thread_main(search_rx, engine_clone, search_hwnd);
-        })
-        .expect("failed to spawn search thread");
-
-    // Store app state
+    // Store app state — build router AFTER engine so FileSearchPlugin can be registered
     APP_STATE.with(|state| {
         *state.borrow_mut() = Some(AppState {
             hwnd,
@@ -326,10 +313,10 @@ pub fn run() -> Result<(), String> {
             items: Vec::new(),
             selected_index: 0,
             visible: false,
-            plugin_router: build_plugin_router(),
+            plugin_router: build_plugin_router(Some(engine_for_search.clone())),
             plugin_items: Vec::new(),
+            deferred_query: None,
             current_search_seq: 0,
-            search_tx: Some(search_tx),
             index_ready: false,
             history: super::history::History::load(),
             i18n: {
@@ -376,76 +363,56 @@ pub fn run() -> Result<(), String> {
     Ok(())
 }
 
-/// Search thread main loop: receives requests, queries the engine, posts results.
+/// Convert a PluginResult batch into DisplayItems with shortcut assignment
+/// and history frequency boost applied.
 #[cfg(windows)]
-fn search_thread_main(
-    rx: mpsc::Receiver<SearchRequest>,
-    engine: std::sync::Arc<easysearch_engine::SearchEngine>,
-    hwnd: HWND,
-) {
-    // Load history for frequency-based boost scoring
-    let history = super::history::History::load();
-
-    while let Ok(req) = rx.recv() {
-        // Drain to latest request (discard stale ones)
-        let latest = drain_to_latest(&rx, req);
-
-        if latest.query.trim().is_empty() {
-            continue;
-        }
-
-        let results = engine.search(&latest.query, 20);
-
-        let mut items: Vec<DisplayItem> = results
-            .into_iter()
-            .map(|r| {
-                let path_clone = r.path.clone();
-                let is_dir = r.is_directory;
-                let highlight = r.highlight.clone();
-                DisplayItem {
-                    title: r.name,
-                    subtitle: r.path.clone(),
-                    icon: if is_dir {
-                        "\u{1F4C1}".to_string()
-                    } else {
-                        "\u{1F4C4}".to_string()
-                    },
-                    shortcut: String::new(),
-                    action: easysearch_core::Action::Open(r.path),
-                    icon_path: Some(path_clone),
-                    is_directory: is_dir,
-                    highlight,
-                    score: r.score,
-                }
-            })
-            .collect();
-
-        // Apply history frequency boost to file result scores
-        for item in &mut items {
-            let key = action_to_history_key_static(&item.action);
-            item.score += history.boost_score(&key);
-        }
-
-        let boxed = Box::new(SearchResponse {
-            items,
-            seq_id: latest.seq_id,
-        });
-        let ptr = Box::into_raw(boxed);
-
-        unsafe {
-            let _ = PostMessageW(Some(hwnd), WM_SEARCH_RESULT, WPARAM(0), LPARAM(ptr as isize));
-        }
-    }
+fn plugin_results_to_display(
+    plugin_results: Vec<easysearch_core::PluginResult>,
+    history: &super::history::History,
+) -> Vec<DisplayItem> {
+    plugin_results
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let icon_path = match &r.action {
+                easysearch_core::Action::Open(p) => Some(p.clone()),
+                _ => None,
+            };
+            let action_key = action_to_history_key_static(&r.action);
+            let boosted_score = r.score + history.boost_score(&action_key);
+            DisplayItem {
+                title: r.title,
+                subtitle: r.subtitle,
+                icon: r.icon,
+                shortcut: if i < 9 {
+                    format!("Alt+{}", i + 1)
+                } else {
+                    String::new()
+                },
+                action: r.action,
+                icon_path,
+                is_directory: false,
+                highlight: Vec::new(),
+                score: boosted_score,
+            }
+        })
+        .collect()
 }
 
 /// Build the plugin router with all built-in plugins registered.
+/// If an engine is provided, FileSearchPlugin is also registered.
 #[cfg(windows)]
-fn build_plugin_router() -> Router {
+fn build_plugin_router(engine: Option<std::sync::Arc<easysearch_engine::SearchEngine>>) -> Router {
     let mut router = Router::new();
     router.register(Box::new(plugin_bookmark::BookmarkPlugin::new()));
     router.register(Box::new(plugin_program::ProgramPlugin::new()));
     router.register(Box::new(plugin_sys_cmd::SysCmdPlugin::new()));
     router.register(Box::new(plugin_win_settings::WinSettingsPlugin::new()));
+
+    // FileSearchPlugin — the file search engine as a normal plugin (runs on background thread)
+    if let Some(eng) = engine {
+        router.register(Box::new(plugin_file_search::FileSearchPlugin::new(eng)));
+    }
 
     // Plugin Indicator — shows keyword hints (must be registered last so it
     // only activates when no keyword-plugin claimed the query).
@@ -502,16 +469,6 @@ fn action_to_history_key_static(action: &easysearch_core::Action) -> String {
         easysearch_core::Action::DaemonSearch(q) => format!("search:{q}"),
         easysearch_core::Action::None => String::new(),
     }
-}
-
-/// Drain all pending requests from the channel, returning the latest one.
-#[cfg(windows)]
-fn drain_to_latest(rx: &mpsc::Receiver<SearchRequest>, initial: SearchRequest) -> SearchRequest {
-    let mut latest = initial;
-    while let Ok(newer) = rx.try_recv() {
-        latest = newer;
-    }
-    latest
 }
 
 /// Position the IME composition window *and* candidate list near the text caret.
@@ -740,24 +697,96 @@ unsafe extern "system" fn wnd_proc(
 
         // ── Debounce timer ───────────────────────────────────────────────────
         WM_TIMER => {
-            if wparam.0 == DEBOUNCE_TIMER_ID {
-                unsafe { let _ = KillTimer(Some(hwnd), DEBOUNCE_TIMER_ID); }
+            if wparam.0 == DEFERRED_POLL_TIMER_ID {
+                // Poll for background plugin results (FileSearch)
+                let should_stop = APP_STATE.with(|state| {
+                    if let Ok(mut s) = state.try_borrow_mut() {
+                        if let Some(ref mut app) = *s {
+                            match &mut app.deferred_query {
+                                Some(dq) => {
+                                    match dq.rx.try_recv() {
+                                        Ok(plugin_results) => {
+                                            // Only accept results matching current seq_id
+                                            if dq.seq_id == app.current_search_seq {
+                                                let query = app.input.text().to_string();
+                                                let new_items = plugin_results_to_display(
+                                                    plugin_results,
+                                                    &app.history,
+                                                );
 
-                APP_STATE.with(|state| {
-                    if let Ok(s) = state.try_borrow() {
-                        if let Some(ref app) = *s {
-                            let query = app.input.text().to_string();
-                            if !query.trim().is_empty() {
-                                if let Some(ref tx) = app.search_tx {
-                                    let _ = tx.send(SearchRequest {
-                                        query,
-                                        seq_id: app.current_search_seq,
-                                    });
+                                                // Apply history boost to immediate plugin items too
+                                                let mut immediate_items: Vec<DisplayItem> = app.plugin_items.iter().map(|item| {
+                                                    let mut item = item.clone();
+                                                    let key = action_to_history_key_static(&item.action);
+                                                    item.score = item.score.saturating_add(app.history.boost_score(&key));
+                                                    item
+                                                }).collect();
+
+                                                // Merge all results
+                                                immediate_items.extend(new_items);
+                                                immediate_items.sort_by(|a, b| b.score.cmp(&a.score));
+
+                                                // Move pinned items to the top
+                                                let mut pinned = Vec::new();
+                                                let mut unpinned = Vec::new();
+                                                for item in immediate_items {
+                                                    let key = action_to_history_key_static(&item.action);
+                                                    if app.history.is_pinned(&query, &key) {
+                                                        pinned.push(item);
+                                                    } else {
+                                                        unpinned.push(item);
+                                                    }
+                                                }
+                                                pinned.sort_by_key(|item| {
+                                                    let key = action_to_history_key_static(&item.action);
+                                                    app.history.pinned_position(&query, &key).unwrap_or(usize::MAX)
+                                                });
+                                                pinned.extend(unpinned);
+                                                let mut all_items = pinned;
+
+                                                // Reassign shortcut labels based on final position
+                                                for (i, item) in all_items.iter_mut().enumerate() {
+                                                    item.shortcut = if i < 9 {
+                                                        format!("Alt+{}", i + 1)
+                                                    } else {
+                                                        String::new()
+                                                    };
+                                                }
+
+                                                app.items = all_items;
+                                                resize_for_results(app);
+                                            }
+                                            true // done, stop timer
+                                        }
+                                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                            false // still waiting
+                                        }
+                                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                            true // sender dropped, stop
+                                        }
+                                    }
                                 }
+                                None => true, // no deferred query, stop timer
                             }
+                        } else {
+                            true
                         }
+                    } else {
+                        true
                     }
                 });
+
+                if should_stop {
+                    APP_STATE.with(|state| {
+                        if let Ok(mut s) = state.try_borrow_mut() {
+                            if let Some(ref mut app) = *s {
+                                app.deferred_query = None;
+                            }
+                        }
+                    });
+                    unsafe { let _ = KillTimer(Some(hwnd), DEFERRED_POLL_TIMER_ID); }
+                }
+                do_render();
             } else if wparam.0 == ANIM_TIMER_ID {
                 // Advance animation frame
                 let done = APP_STATE.with(|state| {
@@ -779,44 +808,6 @@ unsafe extern "system" fn wnd_proc(
             } else if wparam.0 == SETTINGS_POLL_TIMER_ID {
                 poll_settings_changes(hwnd);
             }
-            LRESULT(0)
-        }
-
-        // ── Search results from background thread ────────────────────────────
-        m if m == WM_SEARCH_RESULT => {
-            let ptr = lparam.0 as *mut SearchResponse;
-            let response = unsafe { Box::from_raw(ptr) };
-
-            APP_STATE.with(|state| {
-                if let Ok(mut s) = state.try_borrow_mut() {
-                    if let Some(ref mut app) = *s {
-                        // Only accept results matching current seq_id
-                        if response.seq_id == app.current_search_seq {
-                            // Merge plugin + file results and sort by unified score
-                            let mut all_items = app.plugin_items.clone();
-                            all_items.extend(response.items);
-                            all_items.sort_by(|a, b| b.score.cmp(&a.score));
-
-                            // Reassign shortcut labels based on final position
-                            for (i, item) in all_items.iter_mut().enumerate() {
-                                item.shortcut = if i < 9 {
-                                    format!("Alt+{}", i + 1)
-                                } else {
-                                    String::new()
-                                };
-                            }
-
-                            app.items = all_items;
-                            app.anim_frame = 0;
-                            unsafe {
-                                let _ = SetTimer(Some(app.hwnd), ANIM_TIMER_ID, ANIM_FRAME_MS, None);
-                            }
-                            resize_for_results(app);
-                        }
-                    }
-                }
-            });
-            do_render();
             LRESULT(0)
         }
 
@@ -1080,7 +1071,11 @@ fn handle_keydown(wparam: WPARAM) {
     do_render();
 }
 
-/// Called when input text changes — queries plugins and schedules file search.
+/// Called when input text changes — queries plugins via Router.
+///
+/// Fast (non-background) plugins run immediately; background plugins (e.g.
+/// FileSearch) are spawned on a separate thread and results are polled via
+/// a Windows timer.
 #[cfg(windows)]
 fn on_input_changed(app: &mut AppState) {
     let query = app.input.text().to_string();
@@ -1088,49 +1083,36 @@ fn on_input_changed(app: &mut AppState) {
     app.current_search_seq += 1;
     app.preview = None; // Clear preview on new input
 
+    // Cancel any pending deferred query
+    app.deferred_query = None;
+
     if query.trim().is_empty() {
         // Home screen: show available plugin keyword hints instead of a blank list.
         app.plugin_items.clear();
         app.items = build_home_hints(&app.plugin_router);
         app.anim_frame = ANIM_TOTAL_FRAMES;
-        unsafe {
-            let _ = KillTimer(Some(app.hwnd), DEBOUNCE_TIMER_ID);
-        }
     } else {
-        // Local plugins execute immediately (synchronous, < 1ms)
-        let plugin_results = app.plugin_router.query(&query);
-        app.plugin_items = plugin_results
-            .into_iter()
-            .enumerate()
-            .map(|(i, r)| DisplayItem {
-                title: r.title,
-                subtitle: r.subtitle,
-                icon: r.icon,
-                shortcut: if i < 9 {
-                    format!("Alt+{}", i + 1)
-                } else {
-                    String::new()
-                },
-                action: r.action.clone(),
-                icon_path: match &r.action {
-                    easysearch_core::Action::Open(p) => Some(p.clone()),
-                    _ => None,
-                },
-                is_directory: false,
-                highlight: Vec::new(),
-                score: r.score,
-            })
-            .collect();
+        // ── Fast plugins: execute immediately (synchronous, < 1ms) ──────────
+        let immediate_results = app.plugin_router.query_immediate(&query);
+        app.plugin_items = plugin_results_to_display(immediate_results, &app.history);
         app.items = app.plugin_items.clone();
 
-        // Start fade-in animation for new results
-        // Skip animation for now — just show immediately
+        // Skip animation — show immediately
         app.anim_frame = ANIM_TOTAL_FRAMES;
 
-        // File search goes through debounce timer
-        if app.index_ready {
+        // ── Background plugins: dispatch immediately, cancel old via Drop ──
+        // Replacing `deferred_query` drops the old one → its CancelToken flips
+        // → the old thread exits early at its next check point.
+        let current_seq = app.current_search_seq;
+        if let Some((deferred_rx, cancel)) = app.plugin_router.query_background(&query) {
+            app.deferred_query = Some(DeferredQuery {
+                rx: deferred_rx,
+                seq_id: current_seq,
+                cancel,
+            });
+            // Start poll timer to check for results
             unsafe {
-                let _ = SetTimer(Some(app.hwnd), DEBOUNCE_TIMER_ID, DEBOUNCE_MS, None);
+                let _ = SetTimer(Some(app.hwnd), DEFERRED_POLL_TIMER_ID, DEFERRED_POLL_MS, None);
             }
         }
     }
@@ -1378,6 +1360,7 @@ fn hide_window() {
         app.input.clear();
         app.items.clear();
         app.plugin_items.clear();
+        app.deferred_query = None;
         app.selected_index = 0;
         Some(h)
     });
@@ -1386,7 +1369,7 @@ fn hide_window() {
     if let Some(hwnd) = hwnd {
         unsafe {
             let _ = ShowWindow(hwnd, SW_HIDE);
-            let _ = KillTimer(Some(hwnd), DEBOUNCE_TIMER_ID);
+            let _ = KillTimer(Some(hwnd), DEFERRED_POLL_TIMER_ID);
         }
     }
 }
@@ -1403,12 +1386,13 @@ fn hide_window_inner(app: &mut AppState) {
     // from contexts where the borrow has been released, or when we accept the risk.
     unsafe {
         let _ = ShowWindow(app.hwnd, SW_HIDE);
-        let _ = KillTimer(Some(app.hwnd), DEBOUNCE_TIMER_ID);
+        let _ = KillTimer(Some(app.hwnd), DEFERRED_POLL_TIMER_ID);
     }
     app.visible = false;
     app.input.clear();
     app.items.clear();
     app.plugin_items.clear();
+    app.deferred_query = None;
     app.selected_index = 0;
 }
 

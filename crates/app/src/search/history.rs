@@ -10,10 +10,14 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// History store mapping action keys to execution counts.
+/// History store mapping action keys to execution counts,
+/// plus a set of pinned (top-most) items per query.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct History {
     entries: HashMap<String, u32>,
+    /// Pinned items: maps query (lowercased) → list of action keys that are pinned.
+    #[serde(default)]
+    pinned: HashMap<String, Vec<String>>,
 }
 
 impl History {
@@ -61,6 +65,39 @@ impl History {
             30..=99 => 80,
             _ => 100,
         }
+    }
+
+    /// Pin an item for a specific query (top-most).
+    pub fn pin(&mut self, query: &str, action_key: &str) {
+        let q = query.to_lowercase();
+        let list = self.pinned.entry(q).or_default();
+        if !list.contains(&action_key.to_string()) {
+            list.push(action_key.to_string());
+        }
+    }
+
+    /// Unpin an item.
+    pub fn unpin(&mut self, query: &str, action_key: &str) {
+        let q = query.to_lowercase();
+        if let Some(list) = self.pinned.get_mut(&q) {
+            list.retain(|k| k != action_key);
+        }
+    }
+
+    /// Check if an item is pinned for a given query.
+    pub fn is_pinned(&self, query: &str, action_key: &str) -> bool {
+        let q = query.to_lowercase();
+        self.pinned
+            .get(&q)
+            .map_or(false, |list| list.contains(&action_key.to_string()))
+    }
+
+    /// Get pinned position (0-based) for an item, or None if not pinned.
+    pub fn pinned_position(&self, query: &str, action_key: &str) -> Option<usize> {
+        let q = query.to_lowercase();
+        self.pinned
+            .get(&q)
+            .and_then(|list| list.iter().position(|k| k == action_key))
     }
 }
 

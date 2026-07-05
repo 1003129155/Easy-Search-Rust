@@ -33,6 +33,10 @@ impl Plugin for FileSearchPlugin {
         !query.trim().is_empty() && self.engine.is_ready()
     }
 
+    fn needs_background(&self) -> bool {
+        true // MFT index search is I/O-heavy; must run off the UI thread
+    }
+
     fn query(&self, query: &str) -> Vec<PluginResult> {
         let q = query.trim();
         if q.is_empty() {
