@@ -188,6 +188,10 @@ fn build_index_windows(letter: char, cache_dir: Option<&Path>) -> Result<EsIndex
                         if cached.status.journal_id != 0
                             && cached.status.journal_id == info.journal_id
                         {
+                            eprintln!(
+                                "[easysearch-engine] {letter}: loaded from cache (journal_id={}, last_usn={}, records={})",
+                                cached.status.journal_id, cached.status.last_usn, cached.records_len()
+                            );
                             return Ok(cached);
                         }
                         eprintln!(
@@ -195,7 +199,13 @@ fn build_index_windows(letter: char, cache_dir: Option<&Path>) -> Result<EsIndex
                             cached.status.journal_id, info.journal_id
                         );
                     }
-                    Err(_) => return Ok(cached),
+                    Err(e) => {
+                        eprintln!(
+                            "[easysearch-engine] {letter}: loaded from cache (journal query failed: {e}, using cached journal_id={})",
+                            cached.status.journal_id
+                        );
+                        return Ok(cached);
+                    }
                 },
                 Ok(None) => {}
                 Err(err) => {
@@ -208,7 +218,14 @@ fn build_index_windows(letter: char, cache_dir: Option<&Path>) -> Result<EsIndex
     }
 
     // ── Full MFT rebuild ─────────────────────────────────────────────────────
+    eprintln!("[easysearch-engine] {letter}: starting full MFT rebuild...");
+    let rebuild_start = std::time::Instant::now();
     let mut index = build_index_from_live_mft(letter)?;
+    eprintln!(
+        "[easysearch-engine] {letter}: MFT rebuild complete ({} records, {:.2}s)",
+        index.records_len(),
+        rebuild_start.elapsed().as_secs_f64()
+    );
 
     // Capture the current journal head as the starting cursor.
     match query_usn_journal(drive) {

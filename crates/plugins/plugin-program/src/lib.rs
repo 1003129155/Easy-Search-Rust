@@ -14,7 +14,7 @@ mod scanner;
 mod settings;
 mod uwp;
 
-use easysearch_core::{Action, Plugin, PluginResult, SettingControl, SettingItem};
+use easysearch_core::{Action, ContextAction, ContextData, Plugin, PluginResult, SettingControl, SettingItem};
 pub use settings::ProgramSettings;
 
 use cache::ProgramCache;
@@ -170,6 +170,11 @@ impl Plugin for ProgramPlugin {
                     ProgramSource::StartMenu => p.path.clone(),
                     ProgramSource::Uwp => "uwp-app".to_string(),
                 };
+                let context_actions = build_program_context_actions(&p.name, &p.path, p.source);
+                let parent_path = std::path::Path::new(&p.path)
+                    .parent()
+                    .map(|pp| pp.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 PluginResult {
                     title: p.name.clone(),
                     subtitle: p.path.clone(),
@@ -177,8 +182,12 @@ impl Plugin for ProgramPlugin {
                     action: Action::Open(p.path.clone()),
                     score: score.saturating_sub(i as u32),
                     highlight: Vec::new(),
-                    context_actions: Vec::new(),
-                    context_data: None,
+                    context_actions,
+                    context_data: Some(ContextData {
+                        is_directory: false,
+                        file_path: p.path.clone(),
+                        parent_path,
+                    }),
                 }
             })
             .collect()
@@ -289,6 +298,79 @@ impl Plugin for ProgramPlugin {
             ),
         ]
     }
+}
+
+/// Build context actions for a program result.
+fn build_program_context_actions(
+    title: &str,
+    path: &str,
+    source: ProgramSource,
+) -> Vec<ContextAction> {
+    use easysearch_core::context_labels as cl;
+    use quick_launch_store::global_store;
+
+    let is_saved = global_store()
+        .lock()
+        .map(|store| store.contains(path))
+        .unwrap_or(false);
+
+    let mut actions = Vec::new();
+
+    // "Run as administrator" — only for Win32 programs (not UWP)
+    if source == ProgramSource::StartMenu {
+        actions.push(ContextAction {
+            label: cl::run_as_admin(),
+            action: Action::OpenAsAdmin(path.to_string()),
+            shortcut_hint: String::new(),
+        });
+    }
+
+    // "Open file location"
+    if source == ProgramSource::StartMenu {
+        actions.push(ContextAction {
+            label: cl::open_file_location(),
+            action: Action::OpenContainingFolder(path.to_string()),
+            shortcut_hint: "Ctrl+Enter".to_string(),
+        });
+    }
+
+    // "Add to / Remove from Quick Launch"
+    actions.push(ContextAction {
+        label: cl::toggle_quick_launch(is_saved),
+        action: Action::ToggleQuickLaunch {
+            path: path.to_string(),
+            title: title.to_string(),
+        },
+        shortcut_hint: String::new(),
+    });
+
+    // "Copy path"
+    actions.push(ContextAction {
+        label: cl::copy_path(),
+        action: Action::Copy(path.to_string()),
+        shortcut_hint: String::new(),
+    });
+
+    // "Copy name"
+    actions.push(ContextAction {
+        label: cl::copy_name(),
+        action: Action::Copy(title.to_string()),
+        shortcut_hint: String::new(),
+    });
+
+    // "Windows context menu" — only for Win32 programs with a real file path
+    if source == ProgramSource::StartMenu {
+        actions.push(ContextAction {
+            label: cl::windows_context_menu(),
+            action: Action::ShowFileContextMenu {
+                path: path.to_string(),
+                is_dir: false,
+            },
+            shortcut_hint: "Alt+Enter".to_string(),
+        });
+    }
+
+    actions
 }
 
 /// Check if a program name looks like an uninstaller.

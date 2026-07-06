@@ -203,8 +203,27 @@ impl SearchEngine {
                 emit(&event_tx, EngineEvent::AllReady);
 
                 // Phase 2: USN journal polling loop
+                emit_log(&event_tx, format!(
+                    "[easysearch-engine] USN polling started (interval=1s, drives={:?})",
+                    config.auto_index_drives
+                ));
+
+                // Track consecutive failures per drive to avoid log spam
+                let mut fail_counts: std::collections::HashMap<char, u32> = std::collections::HashMap::new();
+                let mut poll_cycle: u64 = 0;
+
                 while !shutdown.load(Ordering::Acquire) {
                     thread::sleep(Duration::from_secs(1));
+                    poll_cycle += 1;
+
+                    // Log a heartbeat every 60 cycles (≈1 minute) so users know polling is alive
+                    if poll_cycle % 60 == 0 {
+                        let total_records = inner.read().map(|mgr| mgr.record_count()).unwrap_or(0);
+                        emit_log(&event_tx, format!(
+                            "[easysearch-engine] USN poll heartbeat: cycle={}, total_records={}",
+                            poll_cycle, total_records
+                        ));
+                    }
 
                     let drives: Vec<char> = config.auto_index_drives.clone();
                     for drive_letter in drives {
@@ -217,10 +236,31 @@ impl SearchEngine {
                             .ok()
                             .and_then(|mgr| mgr.cursor(drive_letter));
 
-                        if let Some((_journal_id, last_usn)) = cursor {
-                            if let Some(poll) = usn_source::poll_drive(drive_letter, last_usn) {
+                        let Some((_journal_id, last_usn)) = cursor else {
+                            // Only log once per drive when cursor is missing
+                            let count = fail_counts.entry(drive_letter).or_insert(0);
+                            if *count == 0 {
+                                emit_log(&event_tx, format!(
+                                    "[easysearch-engine] {drive_letter}: no cursor available (index not loaded?), skipping poll"
+                                ));
+                            }
+                            *count += 1;
+                            continue;
+                        };
+
+                        match usn_source::poll_drive(drive_letter, last_usn) {
+                            Ok(poll) => {
+                                // Reset failure counter on success
+                                fail_counts.remove(&drive_letter);
+
                                 let event_count = poll.events.len();
+                                let cursor_advanced = poll.new_last_usn != last_usn;
+
                                 if event_count > 0 {
+                                    emit_log(&event_tx, format!(
+                                        "[easysearch-engine] {drive_letter}: USN poll found {} events (usn {} -> {})",
+                                        event_count, last_usn, poll.new_last_usn
+                                    ));
                                     if let Ok(mut mgr) = inner.write() {
                                         mgr.apply(
                                             drive_letter,
@@ -237,6 +277,28 @@ impl SearchEngine {
                                             events_applied: event_count,
                                         },
                                     );
+                                } else if cursor_advanced {
+                                    // Cursor moved but no meaningful events (e.g. only
+                                    // close/security-change records that we don't track)
+                                    if let Ok(mut mgr) = inner.write() {
+                                        mgr.apply(
+                                            drive_letter,
+                                            &poll.events,
+                                            poll.new_last_usn,
+                                            poll.journal_id,
+                                        );
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                let count = fail_counts.entry(drive_letter).or_insert(0);
+                                *count += 1;
+                                // Log first failure and then every 30 consecutive failures
+                                if *count == 1 || *count % 30 == 0 {
+                                    emit_log(&event_tx, format!(
+                                        "[easysearch-engine] {drive_letter}: USN poll failed (count={}): {}",
+                                        count, err
+                                    ));
                                 }
                             }
                         }
@@ -493,6 +555,12 @@ fn emit(tx: &Option<EventSender>, event: EngineEvent) {
     if let Some(sender) = tx {
         let _ = sender.send(event);
     }
+}
+
+/// Emit a log message both to stderr and to the event channel.
+fn emit_log(tx: &Option<EventSender>, msg: String) {
+    eprintln!("{msg}");
+    emit(tx, EngineEvent::Log { message: msg });
 }
 
 fn path_depth(path: &str) -> usize {

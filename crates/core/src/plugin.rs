@@ -38,6 +38,8 @@ pub struct PluginResult {
 pub enum Action {
     /// Open a URL or file path via the system shell.
     Open(String),
+    /// Open a file path with administrator (elevated) privileges.
+    OpenAsAdmin(String),
     /// Open the target's containing folder, selecting it when appropriate.
     OpenContainingFolder(String),
     /// Open the direct parent folder of the target.

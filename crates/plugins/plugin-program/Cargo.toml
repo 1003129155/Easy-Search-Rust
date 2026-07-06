@@ -7,5 +7,6 @@ publish = false
 
 [dependencies]
 easysearch-core = { path = "../../core" }
+quick-launch-store = { path = "../../quick-launch-store" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

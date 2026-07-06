@@ -105,6 +105,8 @@ fn build_context_actions(
     is_directory: bool,
     parent_path: &str,
 ) -> Vec<ContextAction> {
+    use easysearch_core::context_labels as cl;
+
     let is_saved = global_store()
         .lock()
         .map(|store| store.contains(path))
@@ -112,20 +114,12 @@ fn build_context_actions(
 
     let mut actions = vec![
         ContextAction {
-            label: if is_directory {
-                "Open folder".to_string()
-            } else {
-                "Open file".to_string()
-            },
+            label: cl::open_item(is_directory),
             action: Action::Open(path.to_string()),
             shortcut_hint: "Enter".to_string(),
         },
         ContextAction {
-            label: if is_directory {
-                "Open parent folder".to_string()
-            } else {
-                "Open containing folder".to_string()
-            },
+            label: cl::open_containing_folder(is_directory),
             action: if is_directory {
                 Action::OpenParentFolder(path.to_string())
             } else {
@@ -137,28 +131,24 @@ fn build_context_actions(
 
     if !is_directory && !parent_path.is_empty() {
         actions.push(ContextAction {
-            label: "Open parent folder".to_string(),
+            label: cl::open_parent_folder(),
             action: Action::OpenParentFolder(path.to_string()),
             shortcut_hint: String::new(),
         });
     }
 
     actions.push(ContextAction {
-        label: "Copy path".to_string(),
+        label: cl::copy_path(),
         action: Action::Copy(path.to_string()),
         shortcut_hint: String::new(),
     });
     actions.push(ContextAction {
-        label: "Copy name".to_string(),
+        label: cl::copy_name(),
         action: Action::Copy(title.to_string()),
         shortcut_hint: String::new(),
     });
     actions.push(ContextAction {
-        label: if is_saved {
-            "Remove from Quick Launch".to_string()
-        } else {
-            "Add to Quick Launch".to_string()
-        },
+        label: cl::toggle_quick_launch(is_saved),
         action: Action::ToggleQuickLaunch {
             path: path.to_string(),
             title: title.to_string(),
@@ -166,7 +156,7 @@ fn build_context_actions(
         shortcut_hint: String::new(),
     });
     actions.push(ContextAction {
-        label: "Search in this folder".to_string(),
+        label: cl::search_in_folder(),
         action: Action::EnterPathSearch(if is_directory {
             path.to_string()
         } else {
@@ -175,7 +165,7 @@ fn build_context_actions(
         shortcut_hint: String::new(),
     });
     actions.push(ContextAction {
-        label: "Windows context menu".to_string(),
+        label: cl::windows_context_menu(),
         action: Action::ShowFileContextMenu {
             path: path.to_string(),
             is_dir: is_directory,

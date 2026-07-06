@@ -53,40 +53,53 @@ pub fn app_root_dir() -> PathBuf {
 // Settings
 // ────────────────────────────────────────────────────────────────────────────
 
-/// Path to the main settings file: `<root>/settings.json`
+/// Path to the main settings file.
+///
+/// Uses the exe's own directory so it works portably without needing
+/// `%LOCALAPPDATA%` to be writable.
 #[must_use]
 pub fn settings_file() -> PathBuf {
-    app_root_dir().join("settings.json")
+    exe_dir().join("settings.json")
+}
+
+/// Directory where the running exe lives.
+#[must_use]
+pub fn exe_dir() -> PathBuf {
+    std::env::current_exe()
+        .unwrap_or_default()
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // Cache — Index
 // ────────────────────────────────────────────────────────────────────────────
 
-/// Directory for MFT `.uffs` index cache files: `<root>/cache/index/`
+/// Directory for MFT `.uffs` index cache files: `<exe_dir>/cache/index/`
 #[must_use]
 pub fn index_cache_dir() -> PathBuf {
-    app_root_dir().join("cache").join("index")
+    exe_dir().join("cache").join("index")
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // Cache — FlowCache
 // ────────────────────────────────────────────────────────────────────────────
 
-/// Directory for `.flowcache` files: `<root>/cache/flow/`
+/// Directory for `.flowcache` files: `<exe_dir>/cache/flow/`
 #[must_use]
 pub fn flow_cache_dir() -> PathBuf {
-    app_root_dir().join("cache").join("flow")
+    exe_dir().join("cache").join("flow")
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // Cache — Plugins
 // ────────────────────────────────────────────────────────────────────────────
 
-/// Directory for plugin cache files: `<root>/cache/plugins/<plugin_name>/`
+/// Directory for plugin cache files: `<exe_dir>/cache/plugins/<plugin_name>/`
 #[must_use]
 pub fn plugin_cache_dir(plugin_name: &str) -> PathBuf {
-    app_root_dir()
+    exe_dir()
         .join("cache")
         .join("plugins")
         .join(plugin_name)
@@ -96,10 +109,10 @@ pub fn plugin_cache_dir(plugin_name: &str) -> PathBuf {
 // Data
 // ────────────────────────────────────────────────────────────────────────────
 
-/// Directory for user data files: `<root>/data/`
+/// Directory for user data files: `<exe_dir>/data/`
 #[must_use]
 pub fn data_dir() -> PathBuf {
-    app_root_dir().join("data")
+    exe_dir().join("data")
 }
 
 /// Path to the quick launch store file: `<root>/data/quick_launch.json`

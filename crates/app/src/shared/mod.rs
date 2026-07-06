@@ -5,6 +5,5 @@
 pub mod autostart;
 pub mod hotkey;
 pub mod icon_assets;
-pub mod settings_channel;
 pub mod settings_store;
 pub mod tray;

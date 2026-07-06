@@ -5,11 +5,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod search;
+mod settings;
 mod shared;
 mod theme;
 mod i18n;
-mod settings;
-mod welcome;
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -25,20 +24,47 @@ pub static SHARED_SETTINGS: std::sync::OnceLock<Arc<RwLock<Settings>>> = std::sy
 /// Global log file handle — all log!() macro calls write here.
 static LOG_FILE: std::sync::OnceLock<Mutex<std::fs::File>> = std::sync::OnceLock::new();
 
+/// Max log file size before rotation (2 MB).
+const LOG_MAX_SIZE: u64 = 2 * 1024 * 1024;
+
 /// Initialize the log file next to the exe.
+/// If the existing log exceeds [`LOG_MAX_SIZE`], rename it to `.log.old`
+/// and start a fresh file.
 fn init_log() {
     let log_path = std::env::current_exe()
         .unwrap_or_default()
         .with_file_name("easysearch.log");
 
+    // Simple rotation: keep at most one old file
+    if let Ok(meta) = std::fs::metadata(&log_path) {
+        if meta.len() > LOG_MAX_SIZE {
+            let old_path = log_path.with_extension("log.old");
+            let _ = std::fs::rename(&log_path, &old_path);
+        }
+    }
+
+    // Fallback: if exe directory is not writable, try %LOCALAPPDATA%\EasySearch\
     let file = OpenOptions::new()
         .create(true)
         .write(true)
         .append(true)
         .open(&log_path)
-        .expect("failed to open log file");
+        .or_else(|_| {
+            let fallback = easysearch_core::paths::app_root_dir().join("easysearch.log");
+            if let Some(parent) = fallback.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(true)
+                .open(&fallback)
+        });
 
-    LOG_FILE.set(Mutex::new(file)).ok();
+    if let Ok(f) = file {
+        LOG_FILE.set(Mutex::new(f)).ok();
+    }
+    // If both fail, logging is silently disabled (program still runs)
 }
 
 /// Write a line to the log file.
@@ -78,31 +104,25 @@ fn main() {
         log_write(&format!("Backtrace:\n{bt}"));
     }));
 
-    // ── Subprocess mode: --settings launches only the settings window ────────
-    if std::env::args().any(|a| a == "--settings") {
-        run_settings_subprocess();
-        return;
-    }    log!("=== EasySearch GUI starting ===");
+    log!("=== EasySearch GUI starting ===");
 
     // ── Load user settings ──────────────────────────────────────────────────
     let settings_path = easysearch_core::paths::settings_file();
 
-    // Check if first run (settings.json didn't exist → first launch)
-    let is_first_run = !settings_path.exists();
-
-    let settings = SettingsStore::load(&settings_path);
+    let settings = if settings_path.exists() {
+        log!("Loading settings from {:?}", settings_path);
+        SettingsStore::load(&settings_path)
+    } else {
+        log!("No settings file found, using defaults");
+        // Don't block startup by writing — save lazily on first change
+        Settings::default()
+    };
+    log!("Settings ready (drives={:?})", settings.index_drives);
     let shared_settings = Arc::new(RwLock::new(settings));
-
-    // ── Welcome wizard (first run only) ─────────────────────────────────────
-    if is_first_run {
-        log!("First run detected, launching welcome wizard");
-        if let Err(e) = welcome::run_welcome() {
-            log!("Welcome wizard error: {e}");
-        }
-    }
 
     // Store in global OnceLock so tray menu handler can access it
     SHARED_SETTINGS.set(shared_settings.clone()).ok();
+    log!("Shared settings initialized");
 
     // ── Initialize theme engine (loaded for validation, search window uses its own) ──
     let _theme_engine = ThemeEngine::new();
@@ -118,6 +138,9 @@ fn main() {
         }
     };
     log!("Language locale: {}", locale);
+
+    // Sync locale to core context_labels so plugins produce localized strings.
+    easysearch_core::context_labels::set_locale(&locale);
 
     // Set DPI awareness before creating any windows
     #[cfg(windows)]
@@ -135,6 +158,24 @@ fn main() {
             Ok(()) => log!("Window::run() exited normally"),
             Err(e) => {
                 log!("FATAL: window::run() returned error: {e}");
+                // Show a message box so the user knows why the process exits
+                #[cfg(windows)]
+                {
+                    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+                    use windows::core::PCWSTR;
+                    let msg: Vec<u16> = format!("EasySearch 启动失败:\n{e}\0")
+                        .encode_utf16()
+                        .collect();
+                    let title: Vec<u16> = "EasySearch Error\0".encode_utf16().collect();
+                    unsafe {
+                        MessageBoxW(
+                            None,
+                            PCWSTR(msg.as_ptr()),
+                            PCWSTR(title.as_ptr()),
+                            MB_OK | MB_ICONERROR,
+                        );
+                    }
+                }
                 std::process::exit(1);
             }
         }
@@ -145,72 +186,4 @@ fn main() {
         log!("easysearch-gui requires Windows");
         std::process::exit(1);
     }
-}
-
-/// Run in subprocess mode: only the settings window, then exit.
-/// Called when the exe is invoked with `--settings`.
-fn run_settings_subprocess() {
-    log!("=== Settings subprocess starting ===");
-
-    let settings_path = easysearch_core::paths::settings_file();
-
-    let settings = SettingsStore::load(&settings_path);
-    let shared_settings = Arc::new(RwLock::new(settings));
-
-    // Build plugin info list for the settings UI
-    let locale = shared_settings
-        .read()
-        .map(|settings| {
-            if settings.language.is_empty() {
-                I18nEngine::detect_system_locale()
-            } else {
-                settings.language.clone()
-            }
-        })
-        .unwrap_or_else(|_| String::from("en"));
-    let plugin_infos = build_plugin_infos_for_locale(&locale);
-
-    // Run the iced settings app (blocks until window closes)
-    match settings::app::run_settings_app(shared_settings, plugin_infos) {
-        Ok(()) => log!("Settings window closed normally"),
-        Err(e) => log!("Settings window error: {e}"),
-    }
-}
-
-/// Build plugin info list for the settings UI by instantiating all plugins
-/// and extracting their metadata + settings schema.
-#[cfg(windows)]
-pub(crate) fn build_plugin_infos_for_locale(
-    locale: &str,
-) -> Vec<settings::view_models::page_plugin::PluginInfo> {
-    use easysearch_core::Plugin;
-    use settings::view_models::page_plugin::PluginInfo;
-
-    let plugins: Vec<Box<dyn Plugin>> = vec![
-        Box::new(plugin_bookmark::BookmarkPlugin::new()),
-        Box::new(plugin_program::ProgramPlugin::new()),
-        Box::new(plugin_sys_cmd::SysCmdPlugin::new()),
-        Box::new(plugin_win_settings::WinSettingsPlugin::new()),
-        Box::new(plugin_quick_launch::QuickLaunchPlugin::new()),
-    ];
-
-    plugins
-        .iter()
-        .map(|p| PluginInfo {
-            id: p.name().to_string(),
-            name: p.display_name(locale),
-            description: p.description_for_locale(locale),
-            icon: p.icon().to_string(),
-            keyword: p.default_keyword().map(|s| s.to_string()),
-            settings_schema: p.settings_schema_for_locale(locale),
-            setting_values: p.setting_values(),
-        })
-        .collect()
-}
-
-#[cfg(not(windows))]
-pub(crate) fn build_plugin_infos_for_locale(
-    _locale: &str,
-) -> Vec<settings::view_models::page_plugin::PluginInfo> {
-    Vec::new()
 }

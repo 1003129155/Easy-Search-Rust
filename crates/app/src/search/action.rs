@@ -12,6 +12,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 pub fn execute(action: &Action) {
     match action {
         Action::Open(target) => open_target(target),
+        Action::OpenAsAdmin(target) => open_as_admin(target),
         Action::OpenContainingFolder(path) => super::fs_actions::open_containing_folder(path),
         Action::OpenParentFolder(path) => super::fs_actions::open_parent_folder(path),
         Action::Copy(text) => copy_to_clipboard(text),
@@ -38,6 +39,28 @@ fn open_target(target: &str) {
 
     let target_wide: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
     let verb_wide: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(verb_wide.as_ptr()),
+            PCWSTR(target_wide.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
+/// Open a file path elevated (as administrator) via ShellExecuteW with "runas" verb.
+#[cfg(windows)]
+fn open_as_admin(target: &str) {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::PCWSTR;
+
+    let target_wide: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
+    let verb_wide: Vec<u16> = "runas".encode_utf16().chain(std::iter::once(0)).collect();
 
     unsafe {
         ShellExecuteW(

@@ -19,21 +19,25 @@ pub struct PollResult {
 
 /// Poll the USN journal for `drive_letter` since `last_usn`.
 ///
-/// Returns `None` when the drive/journal can't be read (non-fatal; the caller
-/// simply retries on the next tick).
+/// Returns `Ok(PollResult)` on success, or `Err(reason)` when the
+/// drive/journal can't be read (non-fatal; the caller retries on next tick).
 #[cfg(windows)]
-pub fn poll_drive(drive_letter: char, last_usn: i64) -> Option<PollResult> {
+pub fn poll_drive(drive_letter: char, last_usn: i64) -> Result<PollResult, String> {
     use uffs_mft::platform::DriveLetter;
     use uffs_mft::usn::{Usn, query_usn_journal, read_usn_journal};
 
-    let drive = DriveLetter::parse(drive_letter).ok()?;
-    let info = query_usn_journal(drive).ok()?;
+    let drive = DriveLetter::parse(drive_letter)
+        .map_err(|e| format!("DriveLetter::parse failed: {e}"))?;
+
+    let info = query_usn_journal(drive)
+        .map_err(|e| format!("query_usn_journal failed: {e}"))?;
 
     let start = Usn::new(last_usn);
-    let (records, next_usn) = read_usn_journal(drive, info.journal_id, start).ok()?;
+    let (records, next_usn) = read_usn_journal(drive, info.journal_id, start)
+        .map_err(|e| format!("read_usn_journal failed: {e}"))?;
 
     let events = convert_records(&records);
-    Some(PollResult {
+    Ok(PollResult {
         events,
         new_last_usn: next_usn.raw(),
         journal_id: info.journal_id,
@@ -42,8 +46,8 @@ pub fn poll_drive(drive_letter: char, last_usn: i64) -> Option<PollResult> {
 
 /// Non-Windows stub: journals are unavailable, so nothing to poll.
 #[cfg(not(windows))]
-pub fn poll_drive(_drive_letter: char, _last_usn: i64) -> Option<PollResult> {
-    None
+pub fn poll_drive(_drive_letter: char, _last_usn: i64) -> Result<PollResult, String> {
+    Err("USN journal polling not available on non-Windows".to_string())
 }
 
 /// Convert aggregated USN records into events.

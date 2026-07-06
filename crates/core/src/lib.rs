@@ -8,6 +8,7 @@
 pub mod builder;
 pub mod cache;
 pub mod cache_header;
+pub mod context_labels;
 pub mod delta;
 pub mod error;
 pub mod index;

@@ -35,8 +35,6 @@ use crate::shared::hotkey;
 #[cfg(windows)]
 use crate::shared::icon_assets;
 #[cfg(windows)]
-use crate::shared::settings_channel::{self, SettingsChange, SettingsChangeReceiver};
-#[cfg(windows)]
 use super::input::InputState;
 #[cfg(windows)]
 use super::layout;
@@ -74,9 +72,9 @@ const ANIM_TIMER_ID: usize = 101;
 #[cfg(windows)]
 const SETTINGS_POLL_TIMER_ID: usize = 102;
 
-/// Settings poll interval in milliseconds (100ms for responsive feel).
+/// Settings poll interval in milliseconds (2 seconds for file-based settings reload).
 #[cfg(windows)]
-const SETTINGS_POLL_MS: u32 = 100;
+const SETTINGS_POLL_MS: u32 = 2000;
 
 /// Animation frame interval (~60fps).
 #[cfg(windows)]
@@ -161,8 +159,6 @@ struct AppState {
     icon_cache: super::icon::IconCache,
     /// Animation progress for result list (0 = start, ANIM_TOTAL_FRAMES = done).
     anim_frame: u8,
-    /// Settings change receiver — polled via timer.
-    settings_rx: Option<SettingsChangeReceiver>,
     /// Engine reference for hot-plug drive management.
     engine: Option<std::sync::Arc<easysearch_engine::SearchEngine>>,
     /// Preview info for the currently selected file (loaded on selection change).
@@ -241,14 +237,17 @@ pub fn run() -> Result<(), String> {
         )
     }
     .map_err(|e| format!("CreateWindowExW failed: {e}"))?;
+    crate::log!("Window handle created: {:?}", hwnd.0);
 
     // Initialize renderer
     let mut renderer = Renderer::new()?;
+    crate::log!("Renderer created");
     renderer.create_render_target(hwnd, width as u32, height as u32)?;
+    crate::log!("Render target created");
 
     // Apply DWM window styling (Win11 round corners + shadow)
     apply_dwm_style(hwnd);
-
+    crate::log!("DWM style applied");
     // Register global hotkey
     if !hotkey::register(hwnd) {
         crate::log!("WARNING: failed to register hotkey (Alt+Space)");
@@ -291,10 +290,15 @@ pub fn run() -> Result<(), String> {
             for event in event_rx {
                 let (evt_type, data_ptr) = match event {
                     easysearch_engine::EngineEvent::DriveIndexing { drive } => {
+                        crate::log_write(&format!("[engine] {drive}: indexing started"));
                         let boxed = Box::new(EngineEventPayload::DriveIndexing { drive });
                         (ENGINE_EVT_DRIVE_INDEXING, Box::into_raw(boxed) as isize)
                     }
                     easysearch_engine::EngineEvent::DriveReady { drive, records, elapsed } => {
+                        crate::log_write(&format!(
+                            "[engine] {drive}: ready ({records} records, {:.2}s)",
+                            elapsed.as_secs_f64()
+                        ));
                         let boxed = Box::new(EngineEventPayload::DriveReady {
                             drive,
                             records: records as usize,
@@ -303,6 +307,7 @@ pub fn run() -> Result<(), String> {
                         (ENGINE_EVT_DRIVE_READY, Box::into_raw(boxed) as isize)
                     }
                     easysearch_engine::EngineEvent::DriveError { drive, error } => {
+                        crate::log_write(&format!("[engine] {drive}: ERROR - {error}"));
                         let boxed = Box::new(EngineEventPayload::DriveError {
                             drive,
                             error: error.to_string(),
@@ -310,10 +315,23 @@ pub fn run() -> Result<(), String> {
                         (ENGINE_EVT_DRIVE_ERROR, Box::into_raw(boxed) as isize)
                     }
                     easysearch_engine::EngineEvent::AllReady => {
+                        crate::log_write("[engine] all drives ready, USN polling active");
                         (ENGINE_EVT_ALL_READY, 0)
                     }
                     easysearch_engine::EngineEvent::Shutdown => break,
-                    _ => continue, // UsnUpdate, DriveAdded, DriveRemoved — skip for UI
+                    easysearch_engine::EngineEvent::UsnUpdate { drive, events_applied } => {
+                        if events_applied > 0 {
+                            crate::log_write(&format!(
+                                "[engine] {drive}: USN update applied {events_applied} events"
+                            ));
+                        }
+                        continue;
+                    }
+                    easysearch_engine::EngineEvent::Log { message } => {
+                        crate::log_write(&message);
+                        continue;
+                    }
+                    _ => continue, // DriveAdded, DriveRemoved — skip for UI
                 };
 
                 unsafe {
@@ -369,7 +387,6 @@ pub fn run() -> Result<(), String> {
             },
             icon_cache: super::icon::IconCache::new(),
             anim_frame: ANIM_TOTAL_FRAMES, // Start fully visible (no animation on first load)
-            settings_rx: Some(settings_channel::init_settings_channel()),
             engine: Some(engine_for_search.clone()),
             preview: None,
             index_status: String::new(),
@@ -454,6 +471,7 @@ fn resolve_display_icon_ref(
 
     match action {
         easysearch_core::Action::Open(path)
+        | easysearch_core::Action::OpenAsAdmin(path)
         | easysearch_core::Action::OpenContainingFolder(path)
         | easysearch_core::Action::OpenParentFolder(path)
             if icon_assets::is_filesystem_path(path) =>
@@ -590,6 +608,9 @@ fn recent_to_display(r: &super::history::RecentItem) -> DisplayItem {
 fn history_key_to_action(key: &str) -> easysearch_core::Action {
     if let Some(path) = key.strip_prefix("open:") {
         return easysearch_core::Action::Open(path.to_string());
+    }
+    if let Some(path) = key.strip_prefix("open-admin:") {
+        return easysearch_core::Action::OpenAsAdmin(path.to_string());
     }
     if let Some(path) = key.strip_prefix("open-folder:") {
         return easysearch_core::Action::OpenContainingFolder(path.to_string());
@@ -756,6 +777,7 @@ fn show_native_context_menu_safe() {
 fn action_to_history_key_static(action: &easysearch_core::Action) -> String {
     match action {
         easysearch_core::Action::Open(path) => format!("open:{path}"),
+        easysearch_core::Action::OpenAsAdmin(path) => format!("open-admin:{path}"),
         easysearch_core::Action::OpenContainingFolder(path) => format!("open-folder:{path}"),
         easysearch_core::Action::OpenParentFolder(path) => format!("open-parent:{path}"),
         easysearch_core::Action::EnterPathSearch(path) => format!("path-search:{path}"),
@@ -1264,9 +1286,9 @@ unsafe extern "system" fn wnd_proc(
             let cmd_id = (wparam.0 as u32) & 0xFFFF;
             match cmd_id {
                 tray::IDM_SETTINGS => {
-                    // Open settings window with shared settings
+                    // Open settings.json in user's default editor
                     if let Some(settings) = crate::SHARED_SETTINGS.get() {
-                        crate::settings::open_settings_window(settings.clone());
+                        crate::settings::open_settings_file(settings.clone());
                     }
                 }
                 tray::IDM_EXIT => {
@@ -1952,7 +1974,8 @@ fn open_containing_folder_safe() {
             .as_ref()
             .map(|data| data.file_path.clone())
             .or_else(|| match &app.items[idx].action {
-                easysearch_core::Action::Open(p) => Some(p.clone()),
+                easysearch_core::Action::Open(p)
+                | easysearch_core::Action::OpenAsAdmin(p) => Some(p.clone()),
                 _ => None,
             })
     });
@@ -2075,6 +2098,7 @@ fn execute_selected(app: &mut AppState) {
 fn action_to_history_key(action: &easysearch_core::Action) -> String {
     match action {
         easysearch_core::Action::Open(path) => format!("open:{path}"),
+        easysearch_core::Action::OpenAsAdmin(path) => format!("open-admin:{path}"),
         easysearch_core::Action::OpenContainingFolder(path) => format!("open-folder:{path}"),
         easysearch_core::Action::OpenParentFolder(path) => format!("open-parent:{path}"),
         easysearch_core::Action::EnterPathSearch(path) => format!("path-search:{path}"),
@@ -2114,84 +2138,130 @@ fn update_preview(app: &mut AppState) {
     }
 }
 
-/// Poll the settings change channel and apply changes.
+/// Poll the settings file for changes and apply them.
+/// Reads settings.json from disk and compares with in-memory state.
 #[cfg(windows)]
 fn poll_settings_changes(hwnd: HWND) {
+    use crate::shared::settings_store::SettingsStore;
+
+    let settings_path = easysearch_core::paths::settings_file();
+
+    // Read current settings from the global shared state
+    let current = match crate::SHARED_SETTINGS.get() {
+        Some(s) => match s.read() {
+            Ok(guard) => guard.clone(),
+            Err(_) => return,
+        },
+        None => return,
+    };
+
+    // Load from disk
+    let on_disk = SettingsStore::load(&settings_path);
+
+    // Compare — if nothing changed, bail early
+    if on_disk == current {
+        return;
+    }
+
+    // Apply changes
     let mut changed = false;
+
     APP_STATE.with(|state| {
         let Ok(mut s) = state.try_borrow_mut() else { return; };
         let Some(ref mut app) = *s else { return; };
 
-        let Some(ref rx) = app.settings_rx else { return; };
-
-        // Drain all pending changes
-        while let Ok(change) = rx.try_recv() {
+        // Theme
+        if on_disk.theme != current.theme {
+            app.renderer.theme = match on_disk.theme.as_str() {
+                "Win11Light" => crate::theme::Theme::light(),
+                "Win11Dark" => crate::theme::Theme::dark(),
+                _ => crate::theme::Theme::system(),
+            };
             changed = true;
-            match change {
-                SettingsChange::ThemeChanged(name) => {
-                    // Switch the renderer's legacy theme based on the name
-                    app.renderer.theme = match name.as_str() {
-                        "Win11Light" => crate::theme::Theme::light(),
-                        "Win11Dark" => crate::theme::Theme::dark(),
-                        _ => crate::theme::Theme::system(), // "System" or unknown
-                    };
-                }
-                SettingsChange::LanguageChanged(locale) => {
-                    // Switch i18n engine locale
-                    app.i18n.set_locale(&locale);
-                    app.plugin_router = build_plugin_router(app.engine.clone());
-                }
-                SettingsChange::HotkeyChanged(hotkey_str) => {
-                    // Unregister old hotkey, register new one
-                    hotkey::unregister(hwnd);
-                    if let Some((modifiers, vk)) = parse_hotkey_string(&hotkey_str) {
-                        unsafe {
-                            use windows::Win32::UI::Input::KeyboardAndMouse::{
-                                RegisterHotKey, HOT_KEY_MODIFIERS,
-                            };
-                            let _ = RegisterHotKey(
-                                Some(hwnd),
-                                hotkey::HOTKEY_ID,
-                                HOT_KEY_MODIFIERS(modifiers),
-                                vk,
-                            );
-                        }
-                    } else {
-                        // Fallback: re-register default
-                        hotkey::register(hwnd);
-                    }
-                }
-                SettingsChange::DrivesChanged(drives) => {
-                    if let Some(ref engine) = app.engine {
-                        // Get current drives from engine
-                        let current_labels = engine.drive_labels();
-                        let current_drives: Vec<char> = current_labels
-                            .iter()
-                            .filter_map(|s| s.chars().next())
-                            .collect();
+        }
 
-                        // Add new drives
-                        for &d in &drives {
-                            if !current_drives.contains(&d) {
-                                engine.add_drive(d);
-                            }
-                        }
-                        // Remove old drives
-                        for &d in &current_drives {
-                            if !drives.contains(&d) {
-                                engine.remove_drive(d);
-                            }
-                        }
+        // Language
+        if on_disk.language != current.language {
+            let locale = if on_disk.language.is_empty() {
+                crate::i18n::engine::I18nEngine::detect_system_locale()
+            } else {
+                on_disk.language.clone()
+            };
+            app.i18n.set_locale(&locale);
+            easysearch_core::context_labels::set_locale(&locale);
+            app.plugin_router = build_plugin_router(app.engine.clone());
+            changed = true;
+        }
+
+        // Hotkey
+        if on_disk.hotkey != current.hotkey {
+            hotkey::unregister(hwnd);
+            if let Some((modifiers, vk)) = parse_hotkey_string(&on_disk.hotkey) {
+                unsafe {
+                    use windows::Win32::UI::Input::KeyboardAndMouse::{
+                        RegisterHotKey, HOT_KEY_MODIFIERS,
+                    };
+                    let _ = RegisterHotKey(
+                        Some(hwnd),
+                        hotkey::HOTKEY_ID,
+                        HOT_KEY_MODIFIERS(modifiers),
+                        vk,
+                    );
+                }
+            } else {
+                hotkey::register(hwnd);
+            }
+            changed = true;
+        }
+
+        // Drives
+        if on_disk.index_drives != current.index_drives {
+            if let Some(ref engine) = app.engine {
+                let new_drives: Vec<char> = on_disk.index_drives.iter()
+                    .filter_map(|s| s.chars().next().map(|c| c.to_ascii_uppercase()))
+                    .collect();
+
+                let current_labels = engine.drive_labels();
+                let current_drives: Vec<char> = current_labels
+                    .iter()
+                    .filter_map(|s| s.chars().next())
+                    .collect();
+
+                for &d in &new_drives {
+                    if !current_drives.contains(&d) {
+                        engine.add_drive(d);
                     }
                 }
-                SettingsChange::AutostartChanged(_) => {
-                    // Autostart is handled directly in settings app via registry.
-                    // No action needed in search window.
+                for &d in &current_drives {
+                    if !new_drives.contains(&d) {
+                        engine.remove_drive(d);
+                    }
                 }
             }
+            changed = true;
+        }
+
+        // Autostart
+        if on_disk.autostart != current.autostart {
+            #[cfg(windows)]
+            {
+                if on_disk.autostart {
+                    let _ = crate::shared::autostart::enable();
+                } else {
+                    let _ = crate::shared::autostart::disable();
+                }
+            }
+            changed = true;
         }
     });
+
+    // Update global shared settings
     if changed {
+        if let Some(s) = crate::SHARED_SETTINGS.get() {
+            if let Ok(mut guard) = s.write() {
+                *guard = on_disk;
+            }
+        }
         do_render();
     }
 }

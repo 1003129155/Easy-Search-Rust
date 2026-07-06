@@ -43,6 +43,10 @@ pub enum EngineEvent {
     },
     /// The engine is shutting down.
     Shutdown,
+    /// A log message from the engine (for persistence by the consumer).
+    Log {
+        message: String,
+    },
 }
 
 /// Sender half for engine events.
