@@ -1,40 +1,26 @@
 // Copyright (c) 2025-2026 LIJIALU. MIT License.
 
-//! Plugin management page view — each plugin has an expandable settings panel.
-//!
-//! Layout:
-//! ┌─────────────────────────────────────────────────────┐
-//! │  插件管理                                            │
-//! ├─────────────────────────────────────────────────────┤
-//! │  [▶] 文件搜索          [ON/OFF]  关键词: (无)       │
-//! ├─────────────────────────────────────────────────────┤
-//! │  [▼] Shell             [ON/OFF]  关键词: > ___      │
-//! │  ┌─ 设置 ─────────────────────────────────────┐     │
-//! │  │  Shell 类型:      [CMD ▼]                  │     │
-//! │  │  保持窗口打开:    [  OFF  ]                │     │
-//! │  │  使用 WT:         [  OFF  ]                │     │
-//! │  │  管理员运行:      [  ON   ]                │     │
-//! │  └────────────────────────────────────────────┘     │
-//! ├─────────────────────────────────────────────────────┤
-//! │  [▶] 计算器            [ON/OFF]  关键词: (自动)     │
-//! └─────────────────────────────────────────────────────┘
+//! Plugin management page view.
 
 use easysearch_core::{SettingControl, SettingItem};
-use iced::widget::{button, column, container, pick_list, row, text, toggler, Column};
+use iced::widget::{button, column, container, image, pick_list, row, text, toggler, Column};
 use iced::{Element, Length, Theme};
+
+use crate::i18n::engine::I18nEngine;
+use crate::shared::icon_assets;
 
 use super::super::view_models::page_plugin::{PluginMessage, PluginViewModel};
 
 /// Render the plugin management page.
-pub fn view<'a>(vm: &'a PluginViewModel) -> Element<'a, PluginMessage> {
-    let title = text("插件管理").size(22);
-    let subtitle = text("点击插件名称展开/折叠设置面板").size(12);
+pub fn view<'a>(vm: &'a PluginViewModel, i18n: &'a I18nEngine) -> Element<'a, PluginMessage> {
+    let title = text(i18n.get("settings_plugin_title")).size(22);
+    let subtitle = text(i18n.get("settings_plugin_subtitle")).size(12);
 
     let plugin_items: Vec<Element<'a, PluginMessage>> = vm
         .plugins
         .iter()
         .enumerate()
-        .map(|(index, plugin)| render_plugin_entry(index, plugin))
+        .map(|(index, plugin)| render_plugin_entry(index, plugin, i18n))
         .collect();
 
     let plugin_list = Column::with_children(plugin_items).spacing(4);
@@ -45,14 +31,13 @@ pub fn view<'a>(vm: &'a PluginViewModel) -> Element<'a, PluginMessage> {
         .into()
 }
 
-/// Render a single plugin entry (header + optional expanded settings).
 fn render_plugin_entry<'a>(
     index: usize,
     plugin: &'a super::super::view_models::page_plugin::PluginEntry,
+    i18n: &'a I18nEngine,
 ) -> Element<'a, PluginMessage> {
-    let expand_icon = if plugin.expanded { "▼" } else { "▶" };
+    let expand_icon = if plugin.expanded { "v" } else { ">" };
 
-    // Header row: expand icon + name + description + keyword + toggle
     let expand_btn = button(text(expand_icon).size(12))
         .on_press(PluginMessage::ToggleExpanded { index })
         .padding([4, 8])
@@ -71,36 +56,45 @@ fn render_plugin_entry<'a>(
             ..Default::default()
         });
 
+    let icon_view: Element<'a, PluginMessage> =
+        if let Some(bytes) = icon_assets::named_icon_bytes(&plugin.icon) {
+            image(image::Handle::from_bytes(bytes.to_vec()))
+                .width(Length::Fixed(18.0))
+                .height(Length::Fixed(18.0))
+                .into()
+        } else {
+            container(text(""))
+                .width(Length::Fixed(18.0))
+                .height(Length::Fixed(18.0))
+                .into()
+        };
+
     let keyword_text = match &plugin.keyword {
-        Some(kw) => format!("关键词: {}", kw.trim()),
-        None => String::from("自动匹配"),
+        Some(kw) => format!("{}: {}", i18n.get("settings_plugin_keyword"), kw.trim()),
+        None => i18n.get("settings_plugin_auto").to_string(),
     };
     let keyword_label = text(keyword_text).size(11);
 
     let toggle = toggler(plugin.enabled)
         .on_toggle(move |enabled| PluginMessage::TogglePlugin { index, enabled });
 
-    let header = row![expand_btn, name_btn, keyword_label, toggle]
+    let header = row![expand_btn, icon_view, name_btn, keyword_label, toggle]
         .spacing(12)
         .align_y(iced::Alignment::Center);
 
-    // Build the full entry
     let mut entry_items: Vec<Element<'a, PluginMessage>> = vec![header.into()];
 
-    // If expanded, show description + settings
     if plugin.expanded {
-        // Description
         if !plugin.description.is_empty() {
             let desc = text(&plugin.description).size(12);
             let desc_container = container(desc).padding(8);
             entry_items.push(desc_container.into());
         }
 
-        // Settings panel
         if let Some(schema) = &plugin.settings_schema {
             let settings_items: Vec<Element<'a, PluginMessage>> = schema
                 .iter()
-                .map(|item| render_setting_item(index, item, &plugin.setting_values))
+                .map(|item| render_setting_item(index, item, &plugin.setting_values, i18n))
                 .collect();
 
             let settings_panel = Column::with_children(settings_items)
@@ -127,7 +121,6 @@ fn render_plugin_entry<'a>(
 
     let entry_column = Column::with_children(entry_items).spacing(4);
 
-    // Wrap in a container with bottom border
     container(entry_column)
         .width(Length::Fill)
         .padding([8, 0])
@@ -141,11 +134,11 @@ fn render_plugin_entry<'a>(
         .into()
 }
 
-/// Render a single setting control based on its schema type.
 fn render_setting_item<'a>(
     plugin_index: usize,
     item: &'a SettingItem,
     current_values: &'a [(String, String)],
+    i18n: &'a I18nEngine,
 ) -> Element<'a, PluginMessage> {
     let current_value = current_values
         .iter()
@@ -178,7 +171,6 @@ fn render_setting_item<'a>(
                 current_value.trim_matches('"').to_string()
             };
 
-            // Find selected display label
             let display_options: Vec<String> = options.iter().map(|(_, label)| label.clone()).collect();
             let selected_label = options
                 .iter()
@@ -201,15 +193,14 @@ fn render_setting_item<'a>(
             })
             .into()
         }
-        SettingControl::Number { min: _, max: _, default } => {
-            let current_num: i64 = current_value.parse().unwrap_or(*default);
-            let display = text(format!("{}", current_num)).size(13);
-            // For now, display as text (full spinner widget can come later)
-            display.into()
+        SettingControl::Number { default, .. } => {
+            text(current_value.parse::<i64>().unwrap_or(*default).to_string())
+                .size(13)
+                .into()
         }
-        SettingControl::TextInput { placeholder: _, default: _ } => {
+        SettingControl::TextInput { .. } => {
             let display_value = if current_value.is_empty() {
-                "(未设置)"
+                i18n.get("settings_plugin_unset")
             } else {
                 current_value
             };

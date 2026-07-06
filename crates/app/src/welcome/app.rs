@@ -1,52 +1,39 @@
 // Copyright (c) 2025-2026 LIJIALU. MIT License.
 
-//! Welcome wizard — iced Application implementation.
-//!
-//! A multi-page wizard with forward/back navigation.
-//! Window size: 700×500, not resizable (wizard style).
+//! Welcome wizard iced application.
 
 use iced::widget::{button, column, container, row, text, Space};
 use iced::{Element, Length, Size, Task, Theme};
 
 use super::pages;
 use super::state::{WelcomePage, WelcomeState};
+use crate::i18n::engine::I18nEngine;
 
-// ─── Messages ────────────────────────────────────────────────────────────────
-
-/// Messages handled by the welcome wizard.
 #[derive(Debug, Clone)]
 pub enum Message {
-    /// Go to the next page.
     Next,
-    /// Go to the previous page.
     Back,
-    /// Finish the wizard (close window).
     Finish,
-    /// Select a language (from page 1).
     SelectLanguage(String),
-    /// Select a theme (from page 4).
     SelectTheme(String),
-    /// Toggle autostart (from page 5).
     ToggleAutostart(bool),
 }
 
-// ─── Application State ───────────────────────────────────────────────────────
-
-/// Main state for the welcome wizard window.
 pub struct WelcomeApp {
     state: WelcomeState,
+    i18n: I18nEngine,
 }
 
 impl WelcomeApp {
-    /// Create a new WelcomeApp at the first page.
     fn new() -> (Self, Task<Message>) {
+        let state = WelcomeState::default();
         let app = Self {
-            state: WelcomeState::default(),
+            i18n: I18nEngine::with_locale(&state.language),
+            state,
         };
         (app, Task::none())
     }
 
-    /// Handle incoming messages.
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Next => {
@@ -63,6 +50,7 @@ impl WelcomeApp {
             }
             Message::Finish => iced::exit(),
             Message::SelectLanguage(lang) => {
+                self.i18n.set_locale(&lang);
                 self.state.language = lang;
                 Task::none()
             }
@@ -77,18 +65,16 @@ impl WelcomeApp {
         }
     }
 
-    /// Render the wizard UI.
     fn view(&self) -> Element<'_, Message> {
         let page_content: Element<'_, Message> = match self.state.current_page {
-            WelcomePage::Welcome => pages::page_welcome::view(&self.state),
-            WelcomePage::Hotkey => pages::page_hotkey::view(&self.state),
-            WelcomePage::Features => pages::page_features::view(&self.state),
-            WelcomePage::Theme => pages::page_theme::view(&self.state),
-            WelcomePage::Finish => pages::page_finish::view(&self.state),
+            WelcomePage::Welcome => pages::page_welcome::view(&self.state, &self.i18n),
+            WelcomePage::Hotkey => pages::page_hotkey::view(&self.state, &self.i18n),
+            WelcomePage::Features => pages::page_features::view(&self.state, &self.i18n),
+            WelcomePage::Theme => pages::page_theme::view(&self.state, &self.i18n),
+            WelcomePage::Finish => pages::page_finish::view(&self.state, &self.i18n),
         };
 
         let nav_bar = self.navigation_bar();
-
         let content = column![page_content, nav_bar]
             .spacing(0)
             .width(Length::Fill)
@@ -101,40 +87,34 @@ impl WelcomeApp {
             .into()
     }
 
-    /// Returns the iced Theme.
     fn theme(&self) -> Theme {
         Theme::Light
     }
 
-    // ─── UI Components ───────────────────────────────────────────────────────
+    fn title(&self) -> String {
+        self.i18n.get("welcome_window_title").to_string()
+    }
 
-    /// Bottom navigation bar with Back/Next/Finish buttons.
     fn navigation_bar(&self) -> Element<'_, Message> {
         let page = self.state.current_page;
-        let page_indicator = text(format!(
-            "{} / {}",
-            page.index() + 1,
-            WelcomePage::COUNT
-        ))
-        .size(13);
+        let page_indicator = text(format!("{} / {}", page.index() + 1, WelcomePage::COUNT)).size(13);
 
         let back_btn: Element<'_, Message> = if page.prev().is_some() {
-            button(text("上一步").size(14))
+            button(text(self.i18n.get("welcome_back")).size(14))
                 .on_press(Message::Back)
                 .padding([8, 20])
                 .into()
         } else {
-            // Invisible placeholder to maintain layout
             Space::with_width(80).into()
         };
 
         let next_btn: Element<'_, Message> = if page == WelcomePage::Finish {
-            button(text("完成").size(14))
+            button(text(self.i18n.get("welcome_finish")).size(14))
                 .on_press(Message::Finish)
                 .padding([8, 20])
                 .into()
         } else {
-            button(text("下一步").size(14))
+            button(text(self.i18n.get("welcome_next")).size(14))
                 .on_press(Message::Next)
                 .padding([8, 20])
                 .into()
@@ -149,16 +129,16 @@ impl WelcomeApp {
         ]
         .align_y(iced::Alignment::Center)
         .width(Length::Fill)
-        .padding(iced::Padding { top: 16.0, right: 0.0, bottom: 0.0, left: 0.0 })
+        .padding(iced::Padding {
+            top: 16.0,
+            right: 0.0,
+            bottom: 0.0,
+            left: 0.0,
+        })
         .into()
     }
 }
 
-// ─── Public API ──────────────────────────────────────────────────────────────
-
-/// Get the user's choices after the wizard completes.
-///
-/// Returns (language, theme, autostart).
 #[allow(dead_code)]
 pub struct WelcomeChoices {
     pub language: String,
@@ -166,11 +146,8 @@ pub struct WelcomeChoices {
     pub autostart: bool,
 }
 
-/// Run the welcome wizard. Blocks until the wizard is closed.
-///
-/// Returns `Ok(())` on success (user choices are applied via settings).
 pub fn run_welcome_app() -> iced::Result {
-    iced::application("EasySearch 欢迎", WelcomeApp::update, WelcomeApp::view)
+    iced::application(WelcomeApp::title, WelcomeApp::update, WelcomeApp::view)
         .theme(WelcomeApp::theme)
         .window_size(Size::new(700.0, 500.0))
         .resizable(false)

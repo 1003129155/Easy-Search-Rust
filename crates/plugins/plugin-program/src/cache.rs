@@ -54,12 +54,7 @@ impl ProgramCache {
     }
 }
 
-/// Cache file location: %APPDATA%/EasySearch/plugins/program/cache.json
+/// Cache file location: %LOCALAPPDATA%/EasySearch/cache/plugins/program/cache.json
 fn cache_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("EasySearch")
-        .join("plugins")
-        .join("program")
-        .join("cache.json")
+    easysearch_core::paths::plugin_cache_dir("program").join("cache.json")
 }

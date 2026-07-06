@@ -1,18 +1,10 @@
 // Copyright (c) 2025-2026 LIJIALU. MIT License.
 
-//! Plugin Indicator — shows available plugin keywords as hints.
-//!
-//! Behavior (same as Flow.Launcher's PluginIndicator):
-//! - When input is empty: show all available keyword-triggered plugins
-//! - When input partially matches a keyword or plugin name: show matching plugins
-//! - Selecting a result fills the keyword into the search box
-//!
-//! This plugin does NOT have a keyword itself — it's a global match plugin
-//! that only activates when no other keyword-plugin matches first.
+//! Plugin Indicator shows available plugin keywords as hints.
 
 use easysearch_core::{Action, Plugin, PluginResult, PluginRouterInfo};
 
-/// Plugin Indicator — lists available plugins and their keywords.
+/// Plugin Indicator lists available plugins and their keywords.
 pub struct PluginIndicatorPlugin {
     /// Cached list of keyword-triggered plugins (populated from Router).
     plugins: Vec<IndicatorEntry>,
@@ -20,7 +12,7 @@ pub struct PluginIndicatorPlugin {
 
 #[derive(Debug, Clone)]
 struct IndicatorEntry {
-    /// Plugin name.
+    /// Plugin display name.
     name: String,
     /// Keyword (e.g. "> ", "kill ", "b ").
     keyword: String,
@@ -40,7 +32,6 @@ impl PluginIndicatorPlugin {
     }
 
     /// Refresh the plugin list from Router metadata.
-    /// Call this after all plugins are registered in the Router.
     pub fn refresh(&mut self, infos: &[PluginRouterInfo]) {
         self.plugins = infos
             .iter()
@@ -54,22 +45,6 @@ impl PluginIndicatorPlugin {
             .collect();
     }
 
-    /// Show all available keyword plugins (for empty query / home screen).
-    #[allow(dead_code)]
-    fn all_results(&self) -> Vec<PluginResult> {
-        self.plugins
-            .iter()
-            .enumerate()
-            .map(|(i, entry)| PluginResult {
-                title: entry.keyword.trim().to_string(),
-                subtitle: format!("激活 {} 插件", entry.name),
-                icon: entry.icon.clone(),
-                action: Action::DaemonSearch(entry.keyword.clone()),
-                score: 100 - i as u32,
-            })
-            .collect()
-    }
-
     /// Show plugins whose keyword or name matches the query.
     fn matching_results(&self, query: &str) -> Vec<PluginResult> {
         let q = query.to_lowercase();
@@ -79,18 +54,22 @@ impl PluginIndicatorPlugin {
             .filter(|entry| {
                 let kw_lower = entry.keyword.trim().to_lowercase();
                 let name_lower = entry.name.to_lowercase();
-                // Match if query is a prefix of the keyword, or contained in the name
-                kw_lower.starts_with(&q)
-                    || kw_lower.contains(&q)
-                    || name_lower.contains(&q)
+                kw_lower.starts_with(&q) || kw_lower.contains(&q) || name_lower.contains(&q)
             })
             .enumerate()
             .map(|(i, entry)| PluginResult {
                 title: entry.keyword.trim().to_string(),
-                subtitle: format!("激活 {} — {}", entry.name, entry.description),
+                subtitle: if entry.description.is_empty() {
+                    format!("Activate {}", entry.name)
+                } else {
+                    format!("Activate {} - {}", entry.name, entry.description)
+                },
                 icon: entry.icon.clone(),
                 action: Action::DaemonSearch(entry.keyword.clone()),
                 score: 200 - i as u32,
+                highlight: Vec::new(),
+                context_actions: Vec::new(),
+                context_data: None,
             })
             .collect()
     }
@@ -104,20 +83,15 @@ impl Default for PluginIndicatorPlugin {
 
 impl Plugin for PluginIndicatorPlugin {
     fn default_keyword(&self) -> Option<&str> {
-        None // global match — participates when no keyword plugin claims the query
+        None
     }
 
     fn matches(&self, query: &str) -> bool {
         let q = query.trim();
-        // Activate when:
-        // 1. Query is empty (home screen)
-        // 2. Query partially matches a keyword or plugin name
-        // 3. Query does NOT already start with a full recognized keyword
-        //    (Router handles that — this plugin won't be called in that case)
         if q.is_empty() {
             return false;
         }
-        // Check if query partially matches any keyword or name
+
         let q_lower = q.to_lowercase();
         self.plugins.iter().any(|entry| {
             let kw = entry.keyword.trim().to_lowercase();
@@ -139,8 +113,25 @@ impl Plugin for PluginIndicatorPlugin {
         "PluginIndicator"
     }
 
+    fn display_name(&self, locale: &str) -> String {
+        match locale.split('-').next().unwrap_or(locale) {
+            "zh" => "插件提示",
+            "ja" => "プラグイン候補",
+            _ => "Plugin Indicator",
+        }
+        .to_string()
+    }
+
     fn description(&self) -> &str {
-        "显示可用插件关键词提示"
+        "Show available plugin keywords and shortcuts"
+    }
+
+    fn description_for_locale(&self, locale: &str) -> String {
+        match locale.split('-').next().unwrap_or(locale) {
+            "zh" => "显示可用插件的关键字和快捷提示".to_string(),
+            "ja" => "利用できるプラグインのキーワード候補を表示します".to_string(),
+            _ => self.description().to_string(),
+        }
     }
 
     fn icon(&self) -> &str {

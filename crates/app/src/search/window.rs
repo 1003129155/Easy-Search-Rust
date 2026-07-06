@@ -7,7 +7,7 @@
 use std::cell::RefCell;
 
 #[cfg(windows)]
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 #[cfg(windows)]
 use windows::Win32::Graphics::Gdi::ValidateRect;
 #[cfg(windows)]
@@ -21,7 +21,7 @@ use windows::Win32::UI::Input::Ime::{
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, SetFocus, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME,
-    VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_UP,
+    VK_LEFT, VK_MENU, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_UP,
 };
 #[cfg(windows)]
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
@@ -32,6 +32,8 @@ use windows::core::PCWSTR;
 
 #[cfg(windows)]
 use crate::shared::hotkey;
+#[cfg(windows)]
+use crate::shared::icon_assets;
 #[cfg(windows)]
 use crate::shared::settings_channel::{self, SettingsChange, SettingsChangeReceiver};
 #[cfg(windows)]
@@ -45,6 +47,8 @@ use crate::shared::tray;
 
 #[cfg(windows)]
 use easysearch_core::Router;
+#[cfg(windows)]
+use quick_launch_store::global_store;
 
 /// Custom message: engine event (progress / error) — wparam encodes the event type.
 #[cfg(windows)]
@@ -92,6 +96,13 @@ const ENGINE_EVT_DRIVE_ERROR: usize = 3;
 #[cfg(windows)]
 const ENGINE_EVT_ALL_READY: usize = 4;
 
+#[cfg(windows)]
+enum EngineEventPayload {
+    DriveIndexing { drive: char },
+    DriveReady { drive: char, records: usize, seconds: f64 },
+    DriveError { drive: char, error: String },
+}
+
 /// Pending background (deferred) results from plugins like FileSearch.
 /// On drop, the cancel token is set to abort the background thread.
 #[cfg(windows)]
@@ -112,12 +123,26 @@ impl Drop for DeferredQuery {
 
 /// Application state stored in thread-local for the window procedure.
 #[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewMode {
+    Results,
+    ContextActions,
+}
+
+/// Application state stored in thread-local for the window procedure.
+#[cfg(windows)]
 struct AppState {
     hwnd: HWND,
     renderer: Renderer,
     input: InputState,
+    view_mode: ViewMode,
     items: Vec<DisplayItem>,
     selected_index: usize,
+    result_items: Vec<DisplayItem>,
+    result_selected_index: usize,
+    context_items: Vec<DisplayItem>,
+    context_selected_index: usize,
+    context_source_index: Option<usize>,
     visible: bool,
     plugin_router: Router,
     /// Items from local plugins (shown immediately).
@@ -146,6 +171,9 @@ struct AppState {
     index_status: String,
     /// Last indexing error message (if any).
     index_error: Option<String>,
+    /// Number of committed IME chars whose follow-up `WM_CHAR` messages should
+    /// be ignored to avoid duplicating CJK input.
+    pending_ime_char_suppression: usize,
 }
 
 #[cfg(windows)]
@@ -263,18 +291,22 @@ pub fn run() -> Result<(), String> {
             for event in event_rx {
                 let (evt_type, data_ptr) = match event {
                     easysearch_engine::EngineEvent::DriveIndexing { drive } => {
-                        let boxed = Box::new(format!("Indexing {}:...", drive));
+                        let boxed = Box::new(EngineEventPayload::DriveIndexing { drive });
                         (ENGINE_EVT_DRIVE_INDEXING, Box::into_raw(boxed) as isize)
                     }
                     easysearch_engine::EngineEvent::DriveReady { drive, records, elapsed } => {
-                        let boxed = Box::new(format!(
-                            "{}:  {} records ({:.1}s)",
-                            drive, records, elapsed.as_secs_f64()
-                        ));
+                        let boxed = Box::new(EngineEventPayload::DriveReady {
+                            drive,
+                            records: records as usize,
+                            seconds: elapsed.as_secs_f64(),
+                        });
                         (ENGINE_EVT_DRIVE_READY, Box::into_raw(boxed) as isize)
                     }
                     easysearch_engine::EngineEvent::DriveError { drive, error } => {
-                        let boxed = Box::new(format!("Error on {}: {}", drive, error));
+                        let boxed = Box::new(EngineEventPayload::DriveError {
+                            drive,
+                            error: error.to_string(),
+                        });
                         (ENGINE_EVT_DRIVE_ERROR, Box::into_raw(boxed) as isize)
                     }
                     easysearch_engine::EngineEvent::AllReady => {
@@ -310,8 +342,14 @@ pub fn run() -> Result<(), String> {
             hwnd,
             renderer,
             input: InputState::new(),
+            view_mode: ViewMode::Results,
             items: Vec::new(),
             selected_index: 0,
+            result_items: Vec::new(),
+            result_selected_index: 0,
+            context_items: Vec::new(),
+            context_selected_index: 0,
+            context_source_index: None,
             visible: false,
             plugin_router: build_plugin_router(Some(engine_for_search.clone())),
             plugin_items: Vec::new(),
@@ -334,8 +372,9 @@ pub fn run() -> Result<(), String> {
             settings_rx: Some(settings_channel::init_settings_channel()),
             engine: Some(engine_for_search.clone()),
             preview: None,
-            index_status: String::from("Building index..."),
+            index_status: String::new(),
             index_error: None,
+            pending_ime_char_suppression: 0,
         });
     });
 
@@ -374,10 +413,12 @@ fn plugin_results_to_display(
         .into_iter()
         .enumerate()
         .map(|(i, r)| {
-            let icon_path = match &r.action {
-                easysearch_core::Action::Open(p) => Some(p.clone()),
-                _ => None,
-            };
+            let is_directory = r
+                .context_data
+                .as_ref()
+                .map(|data| data.is_directory)
+                .unwrap_or(false);
+            let icon_path = resolve_display_icon_ref(&r.icon, &r.action, is_directory);
             let action_key = action_to_history_key_static(&r.action);
             let boosted_score = r.score + history.boost_score(&action_key);
             DisplayItem {
@@ -390,13 +431,43 @@ fn plugin_results_to_display(
                     String::new()
                 },
                 action: r.action,
+                context_actions: r.context_actions,
+                context_data: r.context_data.clone(),
                 icon_path,
-                is_directory: false,
-                highlight: Vec::new(),
+                is_directory,
+                highlight: r.highlight,
                 score: boosted_score,
             }
         })
         .collect()
+}
+
+#[cfg(windows)]
+fn resolve_display_icon_ref(
+    icon: &str,
+    action: &easysearch_core::Action,
+    is_directory: bool,
+) -> Option<String> {
+    if icon_assets::is_named_icon(icon) || icon_assets::is_filesystem_path(icon) {
+        return Some(icon.to_string());
+    }
+
+    match action {
+        easysearch_core::Action::Open(path)
+        | easysearch_core::Action::OpenContainingFolder(path)
+        | easysearch_core::Action::OpenParentFolder(path)
+            if icon_assets::is_filesystem_path(path) =>
+        {
+            Some(path.clone())
+        }
+        easysearch_core::Action::ShowFileContextMenu { path, .. }
+            if icon_assets::is_filesystem_path(path) =>
+        {
+            Some(path.clone())
+        }
+        _ if is_directory => Some(String::from("folder")),
+        _ => None,
+    }
 }
 
 /// Build the plugin router with all built-in plugins registered.
@@ -408,6 +479,7 @@ fn build_plugin_router(engine: Option<std::sync::Arc<easysearch_engine::SearchEn
     router.register(Box::new(plugin_program::ProgramPlugin::new()));
     router.register(Box::new(plugin_sys_cmd::SysCmdPlugin::new()));
     router.register(Box::new(plugin_win_settings::WinSettingsPlugin::new()));
+    router.register(Box::new(plugin_quick_launch::QuickLaunchPlugin::new()));
 
     // FileSearchPlugin — the file search engine as a normal plugin (runs on background thread)
     if let Some(eng) = engine {
@@ -416,8 +488,13 @@ fn build_plugin_router(engine: Option<std::sync::Arc<easysearch_engine::SearchEn
 
     // Plugin Indicator — shows keyword hints (must be registered last so it
     // only activates when no keyword-plugin claimed the query).
+    let locale = crate::SHARED_SETTINGS
+        .get()
+        .and_then(|settings| settings.read().ok().map(|s| s.language.clone()))
+        .filter(|locale| !locale.is_empty())
+        .unwrap_or_else(crate::i18n::engine::I18nEngine::detect_system_locale);
     let mut indicator = plugin_indicator::PluginIndicatorPlugin::new();
-    indicator.refresh(&router.plugin_infos());
+    indicator.refresh(&router.plugin_infos_for_locale(&locale));
     router.register(Box::new(indicator));
 
     router
@@ -429,9 +506,9 @@ fn build_plugin_router(engine: Option<std::sync::Arc<easysearch_engine::SearchEn
 /// with its name and description, matching Flow.Launcher's PluginIndicator
 /// behavior. Selecting a hint fills its keyword into the input box.
 #[cfg(windows)]
-fn build_home_hints(router: &Router) -> Vec<DisplayItem> {
+fn build_home_hints(router: &Router, locale: &str) -> Vec<DisplayItem> {
     router
-        .plugin_infos()
+        .plugin_infos_for_locale(locale)
         .into_iter()
         .filter(|info| info.enabled && info.keyword.as_deref().map_or(false, |k| !k.trim().is_empty()))
         .map(|info| {
@@ -449,7 +526,9 @@ fn build_home_hints(router: &Router) -> Vec<DisplayItem> {
                 // Informational hint: Enter fills the keyword into the box
                 // (handled specially in handle_keydown when the query is empty).
                 action: easysearch_core::Action::None,
-                icon_path: None,
+                context_actions: Vec::new(),
+                context_data: None,
+                icon_path: resolve_display_icon_ref(&info.icon, &easysearch_core::Action::None, false),
                 is_directory: false,
                 highlight: Vec::new(),
                 score: 100,
@@ -458,15 +537,236 @@ fn build_home_hints(router: &Router) -> Vec<DisplayItem> {
         .collect()
 }
 
+/// Build the combined home screen when the search box is empty:
+/// top-1 recent item → plugin keyword hints → remaining recent (max 10 total).
+#[cfg(windows)]
+fn build_home_screen(
+    history: &super::history::History,
+    router: &Router,
+    locale: &str,
+) -> Vec<DisplayItem> {
+    const MAX_HISTORY: usize = 10;
+
+    let mut items = Vec::new();
+    let recent = history.top_recent(MAX_HISTORY);
+
+    if let Some(first) = recent.first() {
+        items.push(recent_to_display(first));
+    }
+
+    // Plugin keyword hints in the middle.
+    items.extend(build_home_hints(router, locale));
+
+    // Remaining history items.
+    for r in recent.iter().skip(1) {
+        items.push(recent_to_display(r));
+    }
+
+    items
+}
+
+/// Convert a [`RecentItem`] into a [`DisplayItem`] for the home screen.
+#[cfg(windows)]
+fn recent_to_display(r: &super::history::RecentItem) -> DisplayItem {
+    let action = history_key_to_action(&r.action_key);
+    let icon_path = resolve_display_icon_ref(&r.icon, &action, r.is_directory);
+    DisplayItem {
+        title: r.title.clone(),
+        subtitle: r.subtitle.clone(),
+        icon: r.icon.clone(),
+        shortcut: String::new(),
+        action,
+        context_actions: Vec::new(),
+        context_data: None,
+        icon_path,
+        is_directory: r.is_directory,
+        highlight: Vec::new(),
+        score: 0,
+    }
+}
+
+/// Inverse of [`action_to_history_key`]: parse an action key back to an [`Action`].
+#[cfg(windows)]
+fn history_key_to_action(key: &str) -> easysearch_core::Action {
+    if let Some(path) = key.strip_prefix("open:") {
+        return easysearch_core::Action::Open(path.to_string());
+    }
+    if let Some(path) = key.strip_prefix("open-folder:") {
+        return easysearch_core::Action::OpenContainingFolder(path.to_string());
+    }
+    if let Some(path) = key.strip_prefix("open-parent:") {
+        return easysearch_core::Action::OpenParentFolder(path.to_string());
+    }
+    easysearch_core::Action::None
+}
+
+#[cfg(windows)]
+fn sync_active_items(app: &mut AppState) {
+    match app.view_mode {
+        ViewMode::Results => {
+            app.items = app.result_items.clone();
+            app.selected_index = app.result_selected_index.min(app.items.len().saturating_sub(1));
+        }
+        ViewMode::ContextActions => {
+            app.items = app.context_items.clone();
+            app.selected_index = app
+                .context_selected_index
+                .min(app.items.len().saturating_sub(1));
+        }
+    }
+}
+
+#[cfg(windows)]
+fn open_context_actions(app: &mut AppState) -> bool {
+    if app.view_mode != ViewMode::Results || app.result_items.is_empty() {
+        return false;
+    }
+
+    let index = app.result_selected_index.min(app.result_items.len() - 1);
+    let source = app.result_items[index].clone();
+    let context_items = super::context::build_context_items(&source);
+    if context_items.is_empty() {
+        return false;
+    }
+
+    app.context_source_index = Some(index);
+    app.context_items = context_items;
+    app.context_selected_index = 0;
+    app.view_mode = ViewMode::ContextActions;
+    sync_active_items(app);
+    true
+}
+
+#[cfg(windows)]
+fn close_context_actions(app: &mut AppState) -> bool {
+    if app.view_mode != ViewMode::ContextActions {
+        return false;
+    }
+
+    app.view_mode = ViewMode::Results;
+    app.context_items.clear();
+    app.context_selected_index = 0;
+    app.context_source_index = None;
+    sync_active_items(app);
+    true
+}
+
+#[cfg(windows)]
+fn set_active_selection(app: &mut AppState, index: usize) {
+    app.selected_index = index.min(app.items.len().saturating_sub(1));
+    match app.view_mode {
+        ViewMode::Results => {
+            app.result_selected_index = app.selected_index;
+            update_preview(app);
+        }
+        ViewMode::ContextActions => {
+            app.context_selected_index = app.selected_index;
+        }
+    }
+}
+
+#[cfg(windows)]
+fn item_index_from_client_point(app: &AppState, x: i32, y: i32) -> Option<usize> {
+    if x < 0 || y < 0 || app.items.is_empty() {
+        return None;
+    }
+
+    let list_top =
+        (layout::SEARCH_BAR_HEIGHT + layout::SEPARATOR_HEIGHT + layout::RESULT_MARGIN_V) as i32;
+    if y < list_top {
+        return None;
+    }
+
+    let row = ((y - list_top) as f32 / layout::ITEM_HEIGHT).floor() as usize;
+    let total_items = app.items.len();
+    let max_visible = layout::MAX_VISIBLE_ITEMS;
+    let scroll_offset = if app.selected_index >= max_visible {
+        app.selected_index - max_visible + 1
+    } else {
+        0
+    };
+    let visible_end = (scroll_offset + max_visible).min(total_items);
+    let visible_count = visible_end.saturating_sub(scroll_offset);
+
+    if row >= visible_count {
+        None
+    } else {
+        Some(scroll_offset + row)
+    }
+}
+
+#[cfg(windows)]
+fn selected_item_screen_point(app: &AppState) -> POINT {
+    let mut rect = RECT::default();
+    let _ = unsafe { GetWindowRect(app.hwnd, &mut rect) };
+
+    let max_visible = layout::MAX_VISIBLE_ITEMS;
+    let scroll_offset = if app.selected_index >= max_visible {
+        app.selected_index - max_visible + 1
+    } else {
+        0
+    };
+    let visible_row = app.selected_index.saturating_sub(scroll_offset);
+    let y = rect.top
+        + (layout::SEARCH_BAR_HEIGHT + layout::SEPARATOR_HEIGHT + layout::RESULT_MARGIN_V) as i32
+        + visible_row as i32 * layout::ITEM_HEIGHT as i32
+        + (layout::ITEM_HEIGHT as i32 / 2);
+    let x = rect.left + layout::WINDOW_WIDTH as i32 - 24;
+
+    POINT { x, y }
+}
+
+#[cfg(windows)]
+fn show_native_context_menu_safe() {
+    let request = APP_STATE.with(|state| {
+        let Ok(s) = state.try_borrow() else { return None; };
+        let Some(ref app) = *s else { return None; };
+        if app.items.is_empty() {
+            return None;
+        }
+
+        let point = selected_item_screen_point(app);
+        let current_item = &app.items[app.selected_index.min(app.items.len() - 1)];
+        match &current_item.action {
+            easysearch_core::Action::ShowFileContextMenu { path, is_dir } => {
+                Some((app.hwnd, path.clone(), *is_dir, point))
+            }
+            _ => current_item
+                .context_data
+                .as_ref()
+                .map(|data| (app.hwnd, data.file_path.clone(), data.is_directory, point))
+                .or_else(|| {
+                    app.context_source_index
+                        .and_then(|index| app.result_items.get(index))
+                        .and_then(|item| item.context_data.as_ref())
+                        .map(|data| (app.hwnd, data.file_path.clone(), data.is_directory, point))
+                }),
+        }
+    });
+
+    let Some((hwnd, path, _is_dir, point)) = request else {
+        return;
+    };
+
+    let _ = super::shell_context_menu::show_for_path(hwnd, &path, Some(point));
+}
+
 /// Convert an action to a history key (non-mut version for search thread).
 #[cfg(windows)]
 fn action_to_history_key_static(action: &easysearch_core::Action) -> String {
     match action {
         easysearch_core::Action::Open(path) => format!("open:{path}"),
+        easysearch_core::Action::OpenContainingFolder(path) => format!("open-folder:{path}"),
+        easysearch_core::Action::OpenParentFolder(path) => format!("open-parent:{path}"),
+        easysearch_core::Action::EnterPathSearch(path) => format!("path-search:{path}"),
         easysearch_core::Action::Copy(text) => format!("copy:{}", &text[..text.len().min(50)]),
         easysearch_core::Action::RunCommand { cmd, .. } => format!("run:{cmd}"),
         easysearch_core::Action::SystemCommand(cmd) => format!("sys:{cmd:?}"),
         easysearch_core::Action::DaemonSearch(q) => format!("search:{q}"),
+        easysearch_core::Action::ToggleQuickLaunch { path, .. } => format!("quick-launch:{path}"),
+        easysearch_core::Action::ShowFileContextMenu { path, .. } => {
+            format!("windows-context:{path}")
+        }
         easysearch_core::Action::None => String::new(),
     }
 }
@@ -557,6 +857,10 @@ unsafe extern "system" fn wnd_proc(
                         APP_STATE.with(|state| {
                             if let Ok(mut s) = state.try_borrow_mut() {
                                 if let Some(ref mut app) = *s {
+                                    if app.pending_ime_char_suppression > 0 {
+                                        app.pending_ime_char_suppression -= 1;
+                                        return;
+                                    }
                                     app.input.insert_char(ch);
                                     on_input_changed(app);
                                 }
@@ -633,6 +937,9 @@ unsafe extern "system" fn wnd_proc(
                             APP_STATE.with(|state| {
                                 if let Ok(mut s) = state.try_borrow_mut() {
                                     if let Some(ref mut app) = *s {
+                                        app.pending_ime_char_suppression = app
+                                            .pending_ime_char_suppression
+                                            .saturating_add(text.chars().count());
                                         app.input.insert_str(&text);
                                         on_input_changed(app);
                                     }
@@ -651,6 +958,17 @@ unsafe extern "system" fn wnd_proc(
         }
 
         WM_IME_ENDCOMPOSITION => {
+            // Reset the suppression counter: if the IME ends composition
+            // (e.g. user switches back to English input), any remaining
+            // expected WM_CHAR messages will never arrive.  Without this
+            // reset the counter stays >0 and blocks all subsequent typing.
+            APP_STATE.with(|state| {
+                if let Ok(mut s) = state.try_borrow_mut() {
+                    if let Some(ref mut app) = *s {
+                        app.pending_ime_char_suppression = 0;
+                    }
+                }
+            });
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
 
@@ -724,6 +1042,22 @@ unsafe extern "system" fn wnd_proc(
 
                                                 // Merge all results
                                                 immediate_items.extend(new_items);
+
+                                                // Deduplicate by (title, subtitle): keep the entry with higher score
+                                                {
+                                                    let mut seen = std::collections::HashMap::new();
+                                                    immediate_items.retain(|item| {
+                                                        let key = (item.title.clone(), item.subtitle.clone());
+                                                        match seen.get(&key) {
+                                                            Some(&existing_score) if existing_score >= item.score => false,
+                                                            _ => {
+                                                                seen.insert(key, item.score);
+                                                                true
+                                                            }
+                                                        }
+                                                    });
+                                                }
+
                                                 immediate_items.sort_by(|a, b| b.score.cmp(&a.score));
 
                                                 // Move pinned items to the top
@@ -753,7 +1087,10 @@ unsafe extern "system" fn wnd_proc(
                                                     };
                                                 }
 
-                                                app.items = all_items;
+                                                app.result_items = all_items;
+                                                if app.view_mode == ViewMode::Results {
+                                                    sync_active_items(app);
+                                                }
                                                 resize_for_results(app);
                                             }
                                             true // done, stop timer
@@ -836,18 +1173,47 @@ unsafe extern "system" fn wnd_proc(
                     if let Some(ref mut app) = *s {
                         match evt_type {
                             ENGINE_EVT_DRIVE_INDEXING => {
-                                let msg = unsafe { Box::from_raw(data_ptr as *mut String) };
-                                app.index_status = *msg;
+                                let msg =
+                                    unsafe { Box::from_raw(data_ptr as *mut EngineEventPayload) };
+                                app.index_status = match *msg {
+                                    EngineEventPayload::DriveIndexing { drive } => app
+                                        .i18n
+                                        .get("search_status_indexing_drive")
+                                        .replace("{drive}", &drive.to_string()),
+                                    _ => String::new(),
+                                };
                                 app.index_error = None;
                             }
                             ENGINE_EVT_DRIVE_READY => {
-                                let msg = unsafe { Box::from_raw(data_ptr as *mut String) };
-                                app.index_status = *msg;
+                                let msg =
+                                    unsafe { Box::from_raw(data_ptr as *mut EngineEventPayload) };
+                                app.index_status = match *msg {
+                                    EngineEventPayload::DriveReady {
+                                        drive,
+                                        records,
+                                        seconds,
+                                    } => app
+                                        .i18n
+                                        .get("search_status_drive_ready")
+                                        .replace("{drive}", &drive.to_string())
+                                        .replace("{records}", &records.to_string())
+                                        .replace("{seconds}", &format!("{seconds:.1}")),
+                                    _ => String::new(),
+                                };
                             }
                             ENGINE_EVT_DRIVE_ERROR => {
-                                let msg = unsafe { Box::from_raw(data_ptr as *mut String) };
-                                app.index_error = Some((*msg).clone());
-                                app.index_status = *msg;
+                                let msg =
+                                    unsafe { Box::from_raw(data_ptr as *mut EngineEventPayload) };
+                                let localized = match *msg {
+                                    EngineEventPayload::DriveError { drive, error } => app
+                                        .i18n
+                                        .get("search_status_drive_error")
+                                        .replace("{drive}", &drive.to_string())
+                                        .replace("{error}", &error),
+                                    _ => String::new(),
+                                };
+                                app.index_error = Some(localized.clone());
+                                app.index_status = localized;
                             }
                             ENGINE_EVT_ALL_READY => {
                                 app.index_ready = true;
@@ -911,6 +1277,44 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
 
+        WM_LBUTTONUP | WM_RBUTTONUP => {
+            let x = (lparam.0 as i16) as i32;
+            let y = ((lparam.0 >> 16) as i16) as i32;
+            let is_right_click = msg == WM_RBUTTONUP;
+
+            let deferred = APP_STATE.with(|state| {
+                let Ok(mut s) = state.try_borrow_mut() else { return 0u8; };
+                let Some(ref mut app) = *s else { return 0u8; };
+                let Some(index) = item_index_from_client_point(app, x, y) else {
+                    return 0u8;
+                };
+
+                set_active_selection(app, index);
+                if is_right_click && app.view_mode == ViewMode::Results {
+                    2
+                } else {
+                    1
+                }
+            });
+
+            match deferred {
+                1 => execute_selected_safe(),
+                2 => {
+                    APP_STATE.with(|state| {
+                        if let Ok(mut s) = state.try_borrow_mut() {
+                            if let Some(ref mut app) = *s {
+                                let _ = open_context_actions(app);
+                            }
+                        }
+                    });
+                }
+                _ => {}
+            }
+
+            do_render();
+            LRESULT(0)
+        }
+
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
@@ -921,6 +1325,7 @@ fn handle_keydown(wparam: WPARAM) {
     let vk = wparam.0 as u16;
     let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
     let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+    let alt = unsafe { GetKeyState(VK_MENU.0 as i32) } < 0;
 
     // Deferred actions that require Win32 calls (must be done AFTER releasing borrow)
     enum DeferredAction {
@@ -928,6 +1333,9 @@ fn handle_keydown(wparam: WPARAM) {
         Hide,
         Execute,
         OpenFolder,
+        OpenContext,
+        CloseContext,
+        ShowNativeContextMenu,
     }
 
     let deferred = APP_STATE.with(|state| {
@@ -937,16 +1345,33 @@ fn handle_keydown(wparam: WPARAM) {
         match vk {
             // Escape — hide window
             v if v == VK_ESCAPE.0 => {
-                return DeferredAction::Hide;
+                return if app.view_mode == ViewMode::ContextActions {
+                    DeferredAction::CloseContext
+                } else {
+                    DeferredAction::Hide
+                };
             }
             // Enter — execute selected item; Ctrl+Enter — open containing folder
             v if v == VK_RETURN.0 => {
+                if alt {
+                    return DeferredAction::ShowNativeContextMenu;
+                }
+                if shift {
+                    return DeferredAction::OpenContext;
+                }
                 if ctrl {
-                    return DeferredAction::OpenFolder;
+                    return if app.view_mode == ViewMode::Results {
+                        DeferredAction::OpenFolder
+                    } else {
+                        DeferredAction::Execute
+                    };
                 }
                 // Home-screen hint: fill the selected plugin's keyword into the
                 // input box (so the user can keep typing) instead of executing.
-                if app.input.text().trim().is_empty() && !app.items.is_empty() {
+                if app.view_mode == ViewMode::Results
+                    && app.input.text().trim().is_empty()
+                    && !app.items.is_empty()
+                {
                     let idx = app.selected_index.min(app.items.len() - 1);
                     let keyword = app.items[idx].title.trim().to_string();
                     if !keyword.is_empty() {
@@ -958,6 +1383,9 @@ fn handle_keydown(wparam: WPARAM) {
                 }
                 return DeferredAction::Execute;
             }
+            v if ctrl && v == 0x4F => {
+                return DeferredAction::OpenContext;
+            }
             // Up arrow — select previous (wrap to bottom)
             v if v == VK_UP.0 => {
                 if app.items.is_empty() {
@@ -967,7 +1395,15 @@ fn handle_keydown(wparam: WPARAM) {
                 } else {
                     app.selected_index = app.items.len() - 1;
                 }
-                update_preview(app);
+                match app.view_mode {
+                    ViewMode::Results => {
+                        app.result_selected_index = app.selected_index;
+                        update_preview(app);
+                    }
+                    ViewMode::ContextActions => {
+                        app.context_selected_index = app.selected_index;
+                    }
+                }
             }
             // Down arrow — select next (wrap to top)
             v if v == VK_DOWN.0 => {
@@ -978,7 +1414,15 @@ fn handle_keydown(wparam: WPARAM) {
                         app.selected_index = 0;
                     }
                 }
-                update_preview(app);
+                match app.view_mode {
+                    ViewMode::Results => {
+                        app.result_selected_index = app.selected_index;
+                        update_preview(app);
+                    }
+                    ViewMode::ContextActions => {
+                        app.context_selected_index = app.selected_index;
+                    }
+                }
             }
             // Backspace
             v if v == VK_BACK.0 => {
@@ -1000,10 +1444,16 @@ fn handle_keydown(wparam: WPARAM) {
             }
             // Left
             v if v == VK_LEFT.0 => {
+                if app.view_mode == ViewMode::ContextActions {
+                    return DeferredAction::CloseContext;
+                }
                 app.input.move_left(shift);
             }
             // Right
             v if v == VK_RIGHT.0 => {
+                if app.view_mode == ViewMode::Results {
+                    return DeferredAction::OpenContext;
+                }
                 app.input.move_right(shift);
             }
             // Ctrl+A — select all
@@ -1065,6 +1515,27 @@ fn handle_keydown(wparam: WPARAM) {
             // Open the containing folder of the selected item
             open_containing_folder_safe();
         }
+        DeferredAction::OpenContext => {
+            APP_STATE.with(|state| {
+                if let Ok(mut s) = state.try_borrow_mut() {
+                    if let Some(ref mut app) = *s {
+                        let _ = open_context_actions(app);
+                    }
+                }
+            });
+        }
+        DeferredAction::CloseContext => {
+            APP_STATE.with(|state| {
+                if let Ok(mut s) = state.try_borrow_mut() {
+                    if let Some(ref mut app) = *s {
+                        let _ = close_context_actions(app);
+                    }
+                }
+            });
+        }
+        DeferredAction::ShowNativeContextMenu => {
+            show_native_context_menu_safe();
+        }
         DeferredAction::None => {}
     }
 
@@ -1079,7 +1550,12 @@ fn handle_keydown(wparam: WPARAM) {
 #[cfg(windows)]
 fn on_input_changed(app: &mut AppState) {
     let query = app.input.text().to_string();
+    app.view_mode = ViewMode::Results;
     app.selected_index = 0;
+    app.result_selected_index = 0;
+    app.context_items.clear();
+    app.context_selected_index = 0;
+    app.context_source_index = None;
     app.current_search_seq += 1;
     app.preview = None; // Clear preview on new input
 
@@ -1087,15 +1563,19 @@ fn on_input_changed(app: &mut AppState) {
     app.deferred_query = None;
 
     if query.trim().is_empty() {
-        // Home screen: show available plugin keyword hints instead of a blank list.
+        // Home screen: top-1 recent → plugin hints → remaining recent (max 10).
         app.plugin_items.clear();
-        app.items = build_home_hints(&app.plugin_router);
+        app.result_items = build_home_screen(
+            &app.history,
+            &app.plugin_router,
+            app.i18n.current_locale(),
+        );
         app.anim_frame = ANIM_TOTAL_FRAMES;
     } else {
         // ── Fast plugins: execute immediately (synchronous, < 1ms) ──────────
-        let immediate_results = app.plugin_router.query_immediate(&query);
+        let (immediate_results, keyword_matched) = app.plugin_router.query_immediate(&query);
         app.plugin_items = plugin_results_to_display(immediate_results, &app.history);
-        app.items = app.plugin_items.clone();
+        app.result_items = app.plugin_items.clone();
 
         // Skip animation — show immediately
         app.anim_frame = ANIM_TOTAL_FRAMES;
@@ -1104,7 +1584,7 @@ fn on_input_changed(app: &mut AppState) {
         // Replacing `deferred_query` drops the old one → its CancelToken flips
         // → the old thread exits early at its next check point.
         let current_seq = app.current_search_seq;
-        if let Some((deferred_rx, cancel)) = app.plugin_router.query_background(&query) {
+        if let Some((deferred_rx, cancel)) = app.plugin_router.query_background(&query, keyword_matched) {
             app.deferred_query = Some(DeferredQuery {
                 rx: deferred_rx,
                 seq_id: current_seq,
@@ -1116,6 +1596,8 @@ fn on_input_changed(app: &mut AppState) {
             }
         }
     }
+
+    sync_active_items(app);
 
     // Resize window based on results
     resize_for_results(app);
@@ -1181,9 +1663,14 @@ fn show_window_safe(hwnd: HWND) {
         if let Ok(mut s) = state.try_borrow_mut() {
             if let Some(ref mut app) = *s {
                 if app.input.text().trim().is_empty() {
-                    app.items = build_home_hints(&app.plugin_router);
+                    app.result_items = build_home_screen(
+                        &app.history,
+                        &app.plugin_router,
+                        app.i18n.current_locale(),
+                    );
                     app.plugin_items.clear();
-                    app.selected_index = 0;
+                    app.result_selected_index = 0;
+                    sync_active_items(app);
                     app.anim_frame = ANIM_TOTAL_FRAMES;
                 }
                 return app.items.len();
@@ -1359,9 +1846,16 @@ fn hide_window() {
         app.visible = false;
         app.input.clear();
         app.items.clear();
+        app.result_items.clear();
+        app.context_items.clear();
         app.plugin_items.clear();
         app.deferred_query = None;
         app.selected_index = 0;
+        app.result_selected_index = 0;
+        app.context_selected_index = 0;
+        app.context_source_index = None;
+        app.view_mode = ViewMode::Results;
+        app.pending_ime_char_suppression = 0;
         Some(h)
     });
 
@@ -1391,9 +1885,16 @@ fn hide_window_inner(app: &mut AppState) {
     app.visible = false;
     app.input.clear();
     app.items.clear();
+    app.result_items.clear();
+    app.context_items.clear();
     app.plugin_items.clear();
     app.deferred_query = None;
     app.selected_index = 0;
+    app.result_selected_index = 0;
+    app.context_selected_index = 0;
+    app.context_source_index = None;
+    app.pending_ime_char_suppression = 0;
+    app.view_mode = ViewMode::Results;
 }
 
 /// Execute the currently selected item.
@@ -1402,30 +1903,36 @@ fn hide_window_inner(app: &mut AppState) {
 #[cfg(windows)]
 fn execute_selected_safe() {
     // Step 1: Extract the action and record history while briefly borrowing
-    let action = APP_STATE.with(|state| {
+    let item = APP_STATE.with(|state| {
         let Ok(mut s) = state.try_borrow_mut() else { return None; };
         let Some(ref mut app) = *s else { return None; };
         if app.items.is_empty() {
             return None;
         }
         let idx = app.selected_index.min(app.items.len() - 1);
-        let action = app.items[idx].action.clone();
+        let item = app.items[idx].clone();
 
-        // Record usage
-        let history_key = action_to_history_key(&action);
-        app.history.record(&history_key);
+        // Record usage with full metadata for the home-screen recent panel.
+        let history_key = action_to_history_key(&item.action);
+        let icon = item.icon_path.as_deref().unwrap_or(&item.icon);
+        app.history.record_full(
+            &history_key,
+            &item.title,
+            &item.subtitle,
+            icon,
+            item.is_directory,
+        );
         app.history.save();
 
-        Some(action)
+        Some(item)
     });
 
-    let Some(action) = action else { return; };
+    let Some(item) = item else { return; };
 
     // Step 2: Hide window (outside borrow — ShowWindow can trigger re-entrant messages)
-    hide_window();
 
     // Step 3: Execute the action (outside borrow — ShellExecute etc.)
-    super::action::execute(&action);
+    execute_action_safe(item.action, item.title, item.context_data);
 }
 
 /// Open the containing folder of the currently selected item (Ctrl+Enter).
@@ -1440,10 +1947,14 @@ fn open_containing_folder_safe() {
             return None;
         }
         let idx = app.selected_index.min(app.items.len() - 1);
-        match &app.items[idx].action {
-            easysearch_core::Action::Open(p) => Some(p.clone()),
-            _ => None,
-        }
+        app.items[idx]
+            .context_data
+            .as_ref()
+            .map(|data| data.file_path.clone())
+            .or_else(|| match &app.items[idx].action {
+                easysearch_core::Action::Open(p) => Some(p.clone()),
+                _ => None,
+            })
     });
 
     let Some(path) = path else { return; };
@@ -1452,9 +1963,88 @@ fn open_containing_folder_safe() {
     hide_window();
 
     // Step 3: Open Explorer with the file selected
-    let _ = std::process::Command::new("explorer.exe")
-        .args(["/select,", &path])
-        .spawn();
+    super::fs_actions::open_containing_folder(&path);
+}
+
+#[cfg(windows)]
+fn execute_action_safe(
+    action: easysearch_core::Action,
+    _title: String,
+    context_data: Option<easysearch_core::ContextData>,
+) {
+    match action {
+        easysearch_core::Action::DaemonSearch(query) => {
+            APP_STATE.with(|state| {
+                if let Ok(mut s) = state.try_borrow_mut() {
+                    if let Some(ref mut app) = *s {
+                        app.input.set_text(&query);
+                        app.input.move_end(false);
+                        on_input_changed(app);
+                    }
+                }
+            });
+        }
+        easysearch_core::Action::EnterPathSearch(path) => {
+            // Normalize: ensure trailing backslash so path_prefix filter
+            // matches only children of this directory (not sibling prefixes).
+            let query = if path.ends_with('\\') {
+                format!("\\{path}")
+            } else {
+                format!("\\{path}\\")
+            };
+            APP_STATE.with(|state| {
+                if let Ok(mut s) = state.try_borrow_mut() {
+                    if let Some(ref mut app) = *s {
+                        app.input.set_text(&query);
+                        app.input.move_end(false);
+                        on_input_changed(app);
+                    }
+                }
+            });
+        }
+        easysearch_core::Action::ToggleQuickLaunch { path, title: item_title } => {
+            let is_dir = context_data
+                .as_ref()
+                .map(|data| data.is_directory)
+                .unwrap_or_else(|| super::fs_actions::is_directory(&path));
+            {
+                let mut store = global_store().lock().unwrap_or_else(|err| err.into_inner());
+                let _ = store.toggle(&path, &item_title, is_dir);
+                let _ = store.save();
+            }
+
+            APP_STATE.with(|state| {
+                if let Ok(mut s) = state.try_borrow_mut() {
+                    if let Some(ref mut app) = *s {
+                        let was_context = app.view_mode == ViewMode::ContextActions;
+                        let source_index = app.context_source_index;
+                        on_input_changed(app);
+                        if was_context {
+                            if let Some(index) = source_index {
+                                app.result_selected_index = index.min(app.result_items.len().saturating_sub(1));
+                                sync_active_items(app);
+                                let _ = open_context_actions(app);
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        easysearch_core::Action::ShowFileContextMenu { .. } => {
+            show_native_context_menu_safe();
+        }
+        other => {
+            let should_hide = !matches!(
+                other,
+                easysearch_core::Action::None
+                    | easysearch_core::Action::ShowFileContextMenu { .. }
+            );
+            if should_hide {
+                hide_window();
+            }
+            super::action::execute(&other);
+        }
+    }
 }
 
 /// Execute the currently selected item.
@@ -1485,10 +2075,17 @@ fn execute_selected(app: &mut AppState) {
 fn action_to_history_key(action: &easysearch_core::Action) -> String {
     match action {
         easysearch_core::Action::Open(path) => format!("open:{path}"),
+        easysearch_core::Action::OpenContainingFolder(path) => format!("open-folder:{path}"),
+        easysearch_core::Action::OpenParentFolder(path) => format!("open-parent:{path}"),
+        easysearch_core::Action::EnterPathSearch(path) => format!("path-search:{path}"),
         easysearch_core::Action::Copy(text) => format!("copy:{}", &text[..text.len().min(50)]),
         easysearch_core::Action::RunCommand { cmd, .. } => format!("run:{cmd}"),
         easysearch_core::Action::SystemCommand(cmd) => format!("sys:{cmd:?}"),
         easysearch_core::Action::DaemonSearch(q) => format!("search:{q}"),
+        easysearch_core::Action::ToggleQuickLaunch { path, .. } => format!("quick-launch:{path}"),
+        easysearch_core::Action::ShowFileContextMenu { path, .. } => {
+            format!("windows-context:{path}")
+        }
         easysearch_core::Action::None => String::new(),
     }
 }
@@ -1542,6 +2139,7 @@ fn poll_settings_changes(hwnd: HWND) {
                 SettingsChange::LanguageChanged(locale) => {
                     // Switch i18n engine locale
                     app.i18n.set_locale(&locale);
+                    app.plugin_router = build_plugin_router(app.engine.clone());
                 }
                 SettingsChange::HotkeyChanged(hotkey_str) => {
                     // Unregister old hotkey, register new one

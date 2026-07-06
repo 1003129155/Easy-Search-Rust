@@ -37,10 +37,7 @@ pub fn open_settings_window(settings: Arc<RwLock<Settings>>) {
     }
 
     // Save current settings to disk first so the subprocess can read them
-    let settings_path = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("EasySearch")
-        .join("settings.json");
+    let settings_path = easysearch_core::paths::settings_file();
     if let Ok(s) = settings.read() {
         let _ = crate::shared::settings_store::SettingsStore::save(&settings_path, &s);
     }

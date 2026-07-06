@@ -7,6 +7,8 @@
 //! history tracking, and pinyin matching.
 
 pub mod action;
+pub mod context;
+pub mod fs_actions;
 pub mod history;
 pub mod icon;
 pub mod input;
@@ -16,6 +18,7 @@ pub mod pinyin;
 #[allow(dead_code)]
 pub mod preview;
 pub mod renderer;
+pub mod shell_context_menu;
 pub mod window;
 
 // Re-export the main entry point so callers can use `search::run()`.

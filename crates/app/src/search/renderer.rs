@@ -44,6 +44,8 @@ pub struct DisplayItem {
     pub icon: String,
     pub shortcut: String,
     pub action: easysearch_core::Action,
+    pub context_actions: Vec<easysearch_core::ContextAction>,
+    pub context_data: Option<easysearch_core::ContextData>,
     /// File path for icon extraction (None for plugin-only results).
     pub icon_path: Option<String>,
     /// Whether this item represents a directory.
@@ -356,24 +358,24 @@ impl Renderer {
 
                 // ── Icon rendering ────────────────────────────────────────
                 // Flow.Launcher: 32x32 icon in the 60px icon area
+                // get_icon() always returns a bitmap (fallback to built-in placeholder)
                 if let Some(ref icon_path) = item.icon_path {
-                    if let Some(bitmap) = icon_cache.get_icon(icon_path, item.is_directory, rt) {
-                        let icon_x = layout::ICON_LEFT + layout::ITEM_MARGIN_H;
-                        let icon_y = y + (layout::ITEM_HEIGHT - layout::ICON_SIZE) / 2.0;
-                        let icon_rect = D2D_RECT_F {
-                            left: icon_x,
-                            top: icon_y,
-                            right: icon_x + layout::ICON_SIZE,
-                            bottom: icon_y + layout::ICON_SIZE,
-                        };
-                        rt.DrawBitmap(
-                            bitmap,
-                            Some(&icon_rect),
-                            opacity,
-                            windows::Win32::Graphics::Direct2D::D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                            None,
-                        );
-                    }
+                    let bitmap = icon_cache.get_icon(icon_path, item.is_directory, rt);
+                    let icon_x = layout::ICON_LEFT + layout::ITEM_MARGIN_H;
+                    let icon_y = y + (layout::ITEM_HEIGHT - layout::ICON_SIZE) / 2.0;
+                    let icon_rect = D2D_RECT_F {
+                        left: icon_x,
+                        top: icon_y,
+                        right: icon_x + layout::ICON_SIZE,
+                        bottom: icon_y + layout::ICON_SIZE,
+                    };
+                    rt.DrawBitmap(
+                        bitmap,
+                        Some(&icon_rect),
+                        opacity,
+                        windows::Win32::Graphics::Direct2D::D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                        None,
+                    );
                 }
 
                 // Title — positioned in Flow.Launcher's column 1 area

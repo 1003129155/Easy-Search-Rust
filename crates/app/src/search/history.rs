@@ -3,21 +3,40 @@
 //! Usage history tracking for boosting frequently used items.
 //!
 //! Persists a simple JSON file at `%LOCALAPPDATA%\EasySearch\history.json`.
-//! Each entry records how many times an action was executed.
+//! Each entry records how many times an action was executed, plus full metadata
+//! for the home-screen recent-items panel.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// Maximum number of recent items kept in persistent storage.
+const MAX_RECENT: usize = 20;
+
+/// Lightweight snapshot of a recently executed item, stored for the home screen.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentItem {
+    pub title: String,
+    pub subtitle: String,
+    pub icon: String,
+    pub action_key: String,
+    #[serde(default)]
+    pub is_directory: bool,
+}
+
 /// History store mapping action keys to execution counts,
-/// plus a set of pinned (top-most) items per query.
+/// plus a set of pinned (top-most) items per query,
+/// plus recent items with full display metadata.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct History {
     entries: HashMap<String, u32>,
     /// Pinned items: maps query (lowercased) → list of action keys that are pinned.
     #[serde(default)]
     pinned: HashMap<String, Vec<String>>,
+    /// Recently used items with display metadata, sorted by count desc.
+    #[serde(default)]
+    recent: Vec<RecentItem>,
 }
 
 impl History {
@@ -34,6 +53,36 @@ impl History {
     pub fn record(&mut self, key: &str) {
         let count = self.entries.entry(key.to_string()).or_insert(0);
         *count = count.saturating_add(1);
+    }
+
+    /// Record a full item execution with display metadata for the home screen.
+    /// Items are kept in chronological order (newest last in storage,
+    /// reversed on display so newest appears first).
+    pub fn record_full(&mut self, key: &str, title: &str, subtitle: &str, icon: &str, is_directory: bool) {
+        self.record(key);
+
+        // Remove existing entry for this action key (dedup by key).
+        self.recent.retain(|r| r.action_key != key);
+
+        // Push as the newest entry (at the end).
+        self.recent.push(RecentItem {
+            title: title.to_string(),
+            subtitle: subtitle.to_string(),
+            icon: icon.to_string(),
+            action_key: key.to_string(),
+            is_directory,
+        });
+
+        // Drop oldest entries from the front if over capacity.
+        while self.recent.len() > MAX_RECENT {
+            self.recent.remove(0);
+        }
+    }
+
+    /// Top N recent items, newest first (for the home screen).
+    #[must_use]
+    pub fn top_recent(&self, n: usize) -> Vec<&RecentItem> {
+        self.recent.iter().rev().take(n).collect()
     }
 
     /// Get the usage count for a key.

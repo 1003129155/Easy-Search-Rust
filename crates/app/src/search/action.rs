@@ -12,12 +12,19 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 pub fn execute(action: &Action) {
     match action {
         Action::Open(target) => open_target(target),
+        Action::OpenContainingFolder(path) => super::fs_actions::open_containing_folder(path),
+        Action::OpenParentFolder(path) => super::fs_actions::open_parent_folder(path),
         Action::Copy(text) => copy_to_clipboard(text),
         Action::RunCommand { cmd, keep_open } => run_command(cmd, *keep_open),
+        Action::EnterPathSearch(_) => {
+            // Handled in window::execute_action_safe (sets input text & re-queries).
+        }
         Action::DaemonSearch(_query) => {
             // TODO: Will be handled via IPC in Phase 3
         }
         Action::SystemCommand(cmd) => execute_system_command(cmd),
+        Action::ToggleQuickLaunch { .. } => {}
+        Action::ShowFileContextMenu { .. } => {}
         Action::None => {}
     }
 }

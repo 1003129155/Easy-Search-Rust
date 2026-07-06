@@ -1,14 +1,12 @@
 // Copyright (c) 2025-2026 LIJIALU. MIT License.
 
-//! Program launcher plugin — FL-grade implementation.
+//! Program launcher plugin.
 //!
 //! Features:
-//! - Win32 programs: Scans Start Menu (.lnk, .exe)
-//! - UWP/MSIX apps: Enumerates via PowerShell `Get-AppxPackage`
-//! - JSON disk cache: Instant load on startup, background rebuild
-//! - Fuzzy matching: prefix > contains > initials scoring
-//! - Periodic refresh: rebuilds index every 30 minutes
-//! - Settings: max_results, hide_uninstallers
+//! - Win32 programs: scans Start Menu shortcuts and executables
+//! - UWP/MSIX apps: enumerates installed apps
+//! - JSON disk cache for fast startup
+//! - Fuzzy matching with periodic refresh
 
 mod cache;
 mod fuzzy;
@@ -63,7 +61,7 @@ impl ProgramPlugin {
         let settings = ProgramSettings::load();
         let (programs, needs_rebuild) = match ProgramCache::load() {
             Some(cached) if !cached.is_stale() => (cached.entries, false),
-            Some(cached) => (cached.entries, true), // use stale cache but trigger rebuild
+            Some(cached) => (cached.entries, true),
             None => (Vec::new(), true),
         };
 
@@ -88,24 +86,19 @@ impl ProgramPlugin {
         let mut entries = scan_start_menu();
         entries.extend(scan_uwp_apps());
 
-        // Filter uninstallers if configured
         if self.settings.hide_uninstallers {
             entries.retain(|e| !is_uninstaller(&e.name));
         }
 
-        // Deduplicate by lowercase name
         entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         entries.dedup_by(|a, b| a.name.to_lowercase() == b.name.to_lowercase());
 
-        // Save to cache
         ProgramCache::save(&entries);
 
-        // Update in-memory list
         if let Ok(mut lock) = self.programs.lock() {
             *lock = entries;
         }
 
-        // Update rebuild timestamp
         if let Ok(mut ts) = self.last_rebuild.lock() {
             *ts = Instant::now();
         }
@@ -133,11 +126,15 @@ impl Default for ProgramPlugin {
 
 impl Plugin for ProgramPlugin {
     fn default_keyword(&self) -> Option<&str> {
-        None // global match
+        None
     }
 
     fn matches(&self, _query: &str) -> bool {
         true
+    }
+
+    fn priority(&self) -> i32 {
+        5
     }
 
     fn query(&self, query: &str) -> Vec<PluginResult> {
@@ -146,17 +143,19 @@ impl Plugin for ProgramPlugin {
             return Vec::new();
         }
 
-        // Periodic refresh check
         self.maybe_refresh();
 
         let programs = self.programs.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Score and sort
         let mut scored: Vec<(u32, &ProgramEntry)> = programs
             .iter()
             .filter_map(|p| {
                 let score = fuzzy_score(&q, &p.name.to_lowercase());
-                if score > 0 { Some((score, p)) } else { None }
+                if score > 0 {
+                    Some((score, p))
+                } else {
+                    None
+                }
             })
             .collect();
 
@@ -177,6 +176,9 @@ impl Plugin for ProgramPlugin {
                     icon,
                     action: Action::Open(p.path.clone()),
                     score: score.saturating_sub(i as u32),
+                    highlight: Vec::new(),
+                    context_actions: Vec::new(),
+                    context_data: None,
                 }
             })
             .collect()
@@ -186,8 +188,25 @@ impl Plugin for ProgramPlugin {
         "Program"
     }
 
+    fn display_name(&self, locale: &str) -> String {
+        match locale_prefix(locale) {
+            "zh" => "程序",
+            "ja" => "プログラム",
+            _ => "Program",
+        }
+        .to_string()
+    }
+
     fn description(&self) -> &str {
-        "启动已安装的程序（Win32 + UWP），支持模糊匹配"
+        "Launch installed Win32 and UWP applications with fuzzy matching"
+    }
+
+    fn description_for_locale(&self, locale: &str) -> String {
+        match locale_prefix(locale) {
+            "zh" => "启动已安装的 Win32 和 UWP 应用，并支持模糊匹配".to_string(),
+            "ja" => "インストール済みの Win32 / UWP アプリをあいまい検索で起動します".to_string(),
+            _ => self.description().to_string(),
+        }
     }
 
     fn icon(&self) -> &str {
@@ -195,11 +214,36 @@ impl Plugin for ProgramPlugin {
     }
 
     fn settings_schema(&self) -> Option<Vec<SettingItem>> {
+        self.settings_schema_for_locale("en")
+    }
+
+    fn settings_schema_for_locale(&self, locale: &str) -> Option<Vec<SettingItem>> {
+        let texts = match locale_prefix(locale) {
+            "zh" => [
+                ("最大结果数", "搜索结果最多显示多少个程序"),
+                ("隐藏卸载程序", "过滤掉名称中包含 Uninstall 的快捷方式"),
+            ],
+            "ja" => [
+                ("最大結果数", "検索結果に表示するプログラム数の上限です"),
+                (
+                    "アンインストーラーを隠す",
+                    "名前に Uninstall を含むショートカットを除外します",
+                ),
+            ],
+            _ => [
+                ("Maximum results", "How many programs to show at most in search results"),
+                (
+                    "Hide uninstallers",
+                    "Filter out shortcuts whose names contain Uninstall",
+                ),
+            ],
+        };
+
         Some(vec![
             SettingItem {
                 key: "max_results".to_string(),
-                label: "最大结果数".to_string(),
-                description: "搜索结果最多显示多少个程序".to_string(),
+                label: texts[0].0.to_string(),
+                description: texts[0].1.to_string(),
                 control: SettingControl::Number {
                     min: 1,
                     max: 30,
@@ -208,8 +252,8 @@ impl Plugin for ProgramPlugin {
             },
             SettingItem {
                 key: "hide_uninstallers".to_string(),
-                label: "隐藏卸载程序".to_string(),
-                description: "过滤掉名称包含 Uninstall 的快捷方式".to_string(),
+                label: texts[1].0.to_string(),
+                description: texts[1].1.to_string(),
                 control: SettingControl::Toggle { default: true },
             },
         ])
@@ -225,7 +269,6 @@ impl Plugin for ProgramPlugin {
             "hide_uninstallers" => {
                 if let Ok(v) = serde_json::from_str::<bool>(value) {
                     self.settings.hide_uninstallers = v;
-                    // Rebuild to apply filter change
                     self.rebuild_index();
                 }
             }
@@ -255,4 +298,8 @@ fn is_uninstaller(name: &str) -> bool {
         || lower.contains("卸载")
         || lower.contains("remove")
         || lower.starts_with("unins")
+}
+
+fn locale_prefix(locale: &str) -> &str {
+    locale.split('-').next().unwrap_or(locale)
 }

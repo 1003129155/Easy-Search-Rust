@@ -316,6 +316,9 @@ impl Plugin for SysCmdPlugin {
                     icon: c.icon.to_string(),
                     action,
                     score: 850,
+                    highlight: Vec::new(),
+                    context_actions: Vec::new(),
+                    context_data: None,
                 }
             })
             .collect()
@@ -325,8 +328,25 @@ impl Plugin for SysCmdPlugin {
         "SystemCommand"
     }
 
+    fn display_name(&self, locale: &str) -> String {
+        match locale.split('-').next().unwrap_or(locale) {
+            "zh" => "系统命令",
+            "ja" => "システムコマンド",
+            _ => "System Commands",
+        }
+        .to_string()
+    }
+
     fn description(&self) -> &str {
         "系统命令：关机、重启、锁定、睡眠等（21 条命令）"
+    }
+
+    fn description_for_locale(&self, locale: &str) -> String {
+        match locale.split('-').next().unwrap_or(locale) {
+            "zh" => "执行关机、重启、锁定以及 EasySearch 应用命令".to_string(),
+            "ja" => "シャットダウン、再起動、ロック、EasySearch のアプリ内コマンドを実行します".to_string(),
+            _ => "Run power, session, and EasySearch system commands".to_string(),
+        }
     }
 
     fn icon(&self) -> &str {
@@ -334,10 +354,26 @@ impl Plugin for SysCmdPlugin {
     }
 
     fn settings_schema(&self) -> Option<Vec<SettingItem>> {
+        self.settings_schema_for_locale("zh-CN")
+    }
+
+    fn settings_schema_for_locale(&self, locale: &str) -> Option<Vec<SettingItem>> {
+        let (label, description) = match locale.split('-').next().unwrap_or(locale) {
+            "zh" => ("跳过确认对话框", "执行关机、重启等危险操作时不弹出确认"),
+            "ja" => (
+                "確認ダイアログを省略",
+                "シャットダウンや再起動などの操作で確認を表示しません",
+            ),
+            _ => (
+                "Skip confirmation dialogs",
+                "Do not ask for confirmation before shutdown, restart, and similar actions",
+            ),
+        };
+
         Some(vec![SettingItem {
             key: "skip_confirmation".to_string(),
-            label: "跳过确认对话框".to_string(),
-            description: "执行关机/重启等危险操作时不弹出确认".to_string(),
+            label: label.to_string(),
+            description: description.to_string(),
             control: SettingControl::Toggle { default: false },
         }])
     }

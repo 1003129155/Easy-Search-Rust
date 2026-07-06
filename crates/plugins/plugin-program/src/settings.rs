@@ -49,13 +49,8 @@ impl ProgramSettings {
         }
     }
 
-    /// Config file path: %APPDATA%/EasySearch/plugins/program/settings.json
+    /// Config file path: %LOCALAPPDATA%/EasySearch/cache/plugins/program/settings.json
     fn config_path() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("EasySearch")
-            .join("plugins")
-            .join("program")
-            .join("settings.json")
+        easysearch_core::paths::plugin_cache_dir("program").join("settings.json")
     }
 }

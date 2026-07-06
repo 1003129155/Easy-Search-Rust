@@ -9,10 +9,10 @@
 //!
 //! # Cache Location
 //!
-//! Indices are stored in a platform-specific secure directory:
-//! - **Windows**: `%LOCALAPPDATA%\uffs\cache\`
-//! - **macOS**: `~/Library/Caches/com.uffs/`
-//! - **Linux**: `$XDG_CACHE_HOME/uffs/` (default `~/.cache/uffs/`)
+//! Indices are stored under the unified EasySearch data directory:
+//! - **Windows**: `%LOCALAPPDATA%\EasySearch\cache\index\`
+//! - **macOS**: `~/Library/Application Support/EasySearch/cache/index/`
+//! - **Linux**: `$XDG_DATA_HOME/EasySearch/cache/index/`
 //!
 //! Files:
 //! - `C_index.uffs` - Index for C: drive
@@ -24,8 +24,9 @@
 //! - Cache directory is created with owner-only permissions (0700 / DACL)
 //! - Cache files are written with owner-only permissions (0600)
 //! - Writes use atomic temp-file-then-rename to prevent partial exposure
-//! - Legacy cache files in `{TEMP}/uffs_index_cache/` are automatically
-//!   migrated to the secure location on first access.
+//! - Legacy cache files in `{TEMP}/uffs_index_cache/` and
+//!   `%LOCALAPPDATA%\uffs\cache\` are automatically migrated to the
+//!   unified location on first access.
 //!
 //! # TTL Behavior
 //!
@@ -76,34 +77,21 @@ static MIGRATION_ONCE: Once = Once::new();
 ///
 /// | Platform | Path |
 /// |----------|------|
-/// | Windows  | `%LOCALAPPDATA%\uffs\cache\` |
-/// | macOS    | `~/Library/Caches/com.uffs/` |
-/// | Linux    | `$XDG_CACHE_HOME/uffs/` (default `~/.cache/uffs/`) |
+/// | Windows  | `%LOCALAPPDATA%\EasySearch\cache\index\` |
+/// | macOS    | `~/Library/Application Support/EasySearch/cache/index/` |
+/// | Linux    | `$XDG_DATA_HOME/EasySearch/cache/index/` |
 ///
 /// Falls back to `{TEMP}/uffs_index_cache/` if the platform directory
 /// cannot be determined (should never happen in practice).
 #[must_use]
 pub fn secure_cache_dir() -> PathBuf {
-    let Some(cache_base) = dirs_next::cache_dir() else {
+    let Some(base) = dirs_next::data_local_dir() else {
         // Fallback: legacy location
         return std::env::temp_dir().join(LEGACY_CACHE_DIR_NAME);
     };
 
-    #[cfg(target_os = "macos")]
-    {
-        // ~/Library/Caches/com.uffs/
-        cache_base.join("com.uffs")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        // %LOCALAPPDATA%\uffs\cache\
-        cache_base.join("uffs").join("cache")
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        // $XDG_CACHE_HOME/uffs/  (default ~/.cache/uffs/)
-        cache_base.join("uffs")
-    }
+    // Unified under EasySearch brand
+    base.join("EasySearch").join("cache").join("index")
 }
 
 /// Returns the legacy (insecure) cache directory path.
@@ -114,65 +102,86 @@ fn legacy_cache_dir() -> PathBuf {
     std::env::temp_dir().join(LEGACY_CACHE_DIR_NAME)
 }
 
-/// Migrates cache files from the legacy temp-dir location to the new
-/// secure directory.
+/// Returns the previous secure cache directory (`%LOCALAPPDATA%\uffs\cache\`).
 ///
-/// This runs **once** per process. If the legacy directory contains `.uffs`
-/// files, they are moved (renamed) to the new location. The legacy directory
-/// is removed afterwards if empty.
+/// Used for migration from the old brand name to the unified EasySearch location.
+#[must_use]
+fn previous_cache_dir() -> PathBuf {
+    dirs_next::data_local_dir()
+        .map(|base| base.join("uffs").join("cache"))
+        .unwrap_or_else(|| std::env::temp_dir().join(LEGACY_CACHE_DIR_NAME))
+}
+
+/// Migrates cache files from legacy locations to the new unified directory.
+///
+/// This runs **once** per process. Handles two legacy locations:
+/// 1. `{TEMP}/uffs_index_cache/` (very old)
+/// 2. `%LOCALAPPDATA%\uffs\cache\` (previous)
+///
+/// Files are moved (renamed) to the new location. Legacy directories
+/// are removed afterwards if empty.
 ///
 /// Errors are logged but never propagated — migration is best-effort.
 pub fn migrate_legacy_cache() {
     MIGRATION_ONCE.call_once(|| {
-        let legacy = legacy_cache_dir();
         let secure = secure_cache_dir();
 
-        // Nothing to migrate if dirs are the same (fallback case) or
-        // legacy dir doesn't exist.
-        if legacy == secure || !legacy.is_dir() {
-            return;
+        // Migrate from temp dir (very old legacy)
+        migrate_from_dir(&legacy_cache_dir(), &secure);
+
+        // Migrate from previous uffs\cache\ location
+        let prev = previous_cache_dir();
+        if prev != secure {
+            migrate_from_dir(&prev, &secure);
         }
-
-        let Ok(entries) = std::fs::read_dir(&legacy) else {
-            return;
-        };
-
-        let mut moved = 0_u32;
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if !name.to_string_lossy().ends_with(".uffs") {
-                continue;
-            }
-
-            // Ensure secure dir exists before first move
-            if moved == 0
-                && let Err(err) = create_secure_dir(&secure)
-            {
-                tracing::warn!(
-                    path = %secure.display(),
-                    error = %err,
-                    "Failed to create secure cache dir during migration"
-                );
-                return;
-            }
-
-            if migrate_single_file(&entry.path(), &secure.join(&name)) {
-                moved += 1;
-            }
-        }
-
-        if moved > 0 {
-            tracing::info!(
-                files = moved,
-                from = %legacy.display(),
-                to = %secure.display(),
-                "Migrated legacy cache files to secure location"
-            );
-        }
-
-        // Remove legacy dir if now empty
-        let _ignore = std::fs::remove_dir(&legacy);
     });
+}
+
+/// Migrate `.uffs` files from `src_dir` to `dst_dir`.
+fn migrate_from_dir(src_dir: &Path, dst_dir: &Path) {
+    if src_dir == dst_dir || !src_dir.is_dir() {
+        return;
+    }
+
+    let Ok(entries) = std::fs::read_dir(src_dir) else {
+        return;
+    };
+
+    let mut moved = 0_u32;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().ends_with(".uffs") {
+            continue;
+        }
+
+        // Ensure secure dir exists before first move
+        if moved == 0
+            && let Err(err) = create_secure_dir(dst_dir)
+        {
+            tracing::warn!(
+                path = %dst_dir.display(),
+                error = %err,
+                "Failed to create secure cache dir during migration"
+            );
+            return;
+        }
+
+        if migrate_single_file(&entry.path(), &dst_dir.join(&name)) {
+            moved += 1;
+        }
+    }
+
+    if moved > 0 {
+        tracing::info!(
+            files = moved,
+            from = %src_dir.display(),
+            to = %dst_dir.display(),
+            "Migrated legacy cache files to unified location"
+        );
+    }
+
+    // Remove legacy dir if now empty
+    let _ignore = std::fs::remove_dir(src_dir);
 }
 
 /// Move a single `.uffs` file from `src` to `dst`, falling back to

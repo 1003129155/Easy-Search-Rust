@@ -1,27 +1,27 @@
 // Copyright (c) 2025-2026 LIJIALU. MIT License.
 
-//! Welcome wizard — Page 3: Feature introduction.
+//! Welcome wizard page 3.
 
 use iced::widget::{column, text, Space};
 use iced::{Element, Length};
 
+use crate::i18n::engine::I18nEngine;
 use crate::welcome::app::Message;
 use crate::welcome::state::WelcomeState;
 
-/// Render the features introduction page.
-pub fn view(_state: &WelcomeState) -> Element<'_, Message> {
-    let title = text("功能亮点").size(24);
+pub fn view<'a>(_state: &'a WelcomeState, i18n: &'a I18nEngine) -> Element<'a, Message> {
+    let title = text(i18n.get("welcome_features_title")).size(24);
 
     let features = column![
-        text("⚡  极速搜索 — 毫秒级 NTFS 文件检索").size(14),
+        text(i18n.get("welcome_feature_fast")).size(14),
         Space::with_height(8),
-        text("🔍  拼音匹配 — 支持拼音首字母搜索中文文件名").size(14),
+        text(i18n.get("welcome_feature_pinyin")).size(14),
         Space::with_height(8),
-        text("🎨  主题定制 — 多种内置主题，支持自定义配色").size(14),
+        text(i18n.get("welcome_feature_theme")).size(14),
         Space::with_height(8),
-        text("🔌  插件扩展 — 计算器、网页搜索等丰富插件").size(14),
+        text(i18n.get("welcome_feature_plugins")).size(14),
         Space::with_height(8),
-        text("🌐  多语言 — 支持中文、英文、日文界面").size(14),
+        text(i18n.get("welcome_feature_languages")).size(14),
     ]
     .spacing(4);
 

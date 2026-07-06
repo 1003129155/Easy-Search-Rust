@@ -1,22 +1,6 @@
 // Copyright (c) 2025-2026 LIJIALU. MIT License.
 
-//! Settings window — iced application framework.
-//!
-//! Implements the main settings window with left navigation panel (240px)
-//! and right content area. Supports page navigation, Escape to close,
-//! and minimum window size of 940×600.
-//!
-//! Settings changes are persisted to disk and broadcast to the search window
-//! via the global settings channel.
-//!
-//! # Requirements
-//! - Req 3.1: Left Navigation_Panel (fixed 240px) + right content area
-//! - Req 3.2: Nav items: 通用设置、插件管理、外观主题、快捷键设置、关于页面
-//! - Req 3.3: Click nav item → switch right content
-//! - Req 3.4: Default to "通用设置" page
-//! - Req 3.5: MVVM — each page has independent View + ViewModel
-//! - Req 3.6: Min window size 940×600, resizable
-//! - Req 3.7: Escape key closes window
+//! Settings window iced application.
 
 use std::sync::{Arc, RwLock};
 
@@ -31,39 +15,30 @@ use super::view_models::page_plugin::{PluginInfo, PluginMessage, PluginViewModel
 use super::view_models::page_theme::{ThemeMessage, ThemeOption, ThemeViewModel};
 use super::views;
 
+use crate::i18n::engine::I18nEngine;
 use crate::shared::settings_channel::{self, SettingsChange};
 use crate::shared::settings_store::{Settings, SettingsStore};
 
-// ─── Navigation Pages ────────────────────────────────────────────────────────
-
-/// All navigable pages in the settings window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPage {
-    /// 通用设置
     General,
-    /// 插件管理
     Plugin,
-    /// 外观主题
     Theme,
-    /// 快捷键设置
     Hotkey,
-    /// 关于页面
     About,
 }
 
 impl SettingsPage {
-    /// Display label for the navigation item.
-    pub fn label(&self) -> &'static str {
+    pub fn label_key(&self) -> &'static str {
         match self {
-            Self::General => "通用设置",
-            Self::Plugin => "插件管理",
-            Self::Theme => "外观主题",
-            Self::Hotkey => "快捷键设置",
-            Self::About => "关于",
+            Self::General => "settings_general",
+            Self::Plugin => "settings_plugin",
+            Self::Theme => "settings_theme",
+            Self::Hotkey => "settings_hotkey",
+            Self::About => "settings_about",
         }
     }
 
-    /// All pages in navigation order.
     pub const ALL: &'static [SettingsPage] = &[
         SettingsPage::General,
         SettingsPage::Plugin,
@@ -73,52 +48,31 @@ impl SettingsPage {
     ];
 }
 
-// ─── Messages ────────────────────────────────────────────────────────────────
-
-/// Messages handled by the settings application.
 #[derive(Debug, Clone)]
 pub enum Message {
-    /// Navigate to a specific settings page.
     NavigateTo(SettingsPage),
-    /// Close the settings window (triggered by Escape key).
     CloseWindow,
-    /// Message from the general settings page.
     General(GeneralMessage),
-    /// Message from the theme settings page.
     Theme(ThemeMessage),
-    /// Message from the hotkey settings page.
     Hotkey(HotkeyMessage),
-    /// Message from the plugin management page.
     Plugin(PluginMessage),
-    /// Message from the about page.
     About(AboutMessage),
 }
 
-// ─── Application State ───────────────────────────────────────────────────────
-
-/// Main state for the settings window.
 pub struct SettingsApp {
-    /// Currently selected navigation page.
     current_page: SettingsPage,
-    /// General settings page view model.
     general_vm: GeneralViewModel,
-    /// Theme settings page view model.
     theme_vm: ThemeViewModel,
-    /// Hotkey settings page view model.
     hotkey_vm: HotkeyViewModel,
-    /// Plugin management page view model.
     plugin_vm: PluginViewModel,
-    /// About page view model.
     about_vm: AboutViewModel,
-    /// Shared settings for persistence.
     shared_settings: Arc<RwLock<Settings>>,
+    i18n: I18nEngine,
 }
 
 impl SettingsApp {
-    /// Create a new SettingsApp, loading initial values from shared settings.
     fn new(shared_settings: Arc<RwLock<Settings>>, plugin_infos: Vec<PluginInfo>) -> (Self, Task<Message>) {
-        // Read current settings to initialize ViewModels
-        let (general_vm, theme_vm, hotkey_vm) = {
+        let (general_vm, theme_vm, hotkey_vm, i18n) = {
             let settings = shared_settings.read().unwrap();
 
             let general_vm = GeneralViewModel {
@@ -136,7 +90,13 @@ impl SettingsApp {
                 is_recording: false,
             };
 
-            (general_vm, theme_vm, hotkey_vm)
+            let i18n = if settings.language.is_empty() {
+                I18nEngine::new()
+            } else {
+                I18nEngine::with_locale(&settings.language)
+            };
+
+            (general_vm, theme_vm, hotkey_vm, i18n)
         };
 
         let mut plugin_vm = PluginViewModel::new();
@@ -150,11 +110,11 @@ impl SettingsApp {
             plugin_vm,
             about_vm: AboutViewModel::new(),
             shared_settings,
+            i18n,
         };
         (app, Task::none())
     }
 
-    /// Handle incoming messages.
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::NavigateTo(page) => {
@@ -164,6 +124,12 @@ impl SettingsApp {
             Message::CloseWindow => iced::exit(),
             Message::General(msg) => {
                 self.general_vm.update(msg.clone());
+                if let GeneralMessage::LanguageChanged(lang) = &msg {
+                    let locale = language_to_code(lang);
+                    self.i18n.set_locale(&locale);
+                    self.plugin_vm
+                        .populate_from_plugins(crate::build_plugin_infos_for_locale(&locale));
+                }
                 self.persist_general(&msg);
                 Task::none()
             }
@@ -188,7 +154,6 @@ impl SettingsApp {
         }
     }
 
-    /// Persist general settings changes and notify search window.
     fn persist_general(&self, msg: &GeneralMessage) {
         match msg {
             GeneralMessage::LanguageChanged(lang) => {
@@ -206,7 +171,6 @@ impl SettingsApp {
                 self.save_settings();
                 self.notify(SettingsChange::AutostartChanged(*enabled));
 
-                // Actually toggle autostart in registry
                 #[cfg(windows)]
                 {
                     if *enabled {
@@ -230,7 +194,6 @@ impl SettingsApp {
         }
     }
 
-    /// Persist theme changes and notify search window.
     fn persist_theme(&self, msg: &ThemeMessage) {
         match msg {
             ThemeMessage::ThemeSelected(theme) => {
@@ -244,7 +207,6 @@ impl SettingsApp {
         }
     }
 
-    /// Persist hotkey changes and notify search window.
     fn persist_hotkey(&self, msg: &HotkeyMessage) {
         match msg {
             HotkeyMessage::HotkeyRecorded(hotkey) => {
@@ -254,38 +216,28 @@ impl SettingsApp {
                 self.save_settings();
                 self.notify(SettingsChange::HotkeyChanged(hotkey.clone()));
             }
-            _ => {} // StartRecording / CancelRecording don't need persistence
+            _ => {}
         }
     }
 
-    /// Save current settings to disk.
     fn save_settings(&self) {
-        let settings_path = dirs::data_local_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("EasySearch")
-            .join("settings.json");
+        let settings_path = easysearch_core::paths::settings_file();
 
         if let Ok(s) = self.shared_settings.read() {
             let _ = SettingsStore::save(&settings_path, &s);
         }
     }
 
-    /// Send a change notification to the search window (best-effort).
     fn notify(&self, change: SettingsChange) {
         if let Some(tx) = settings_channel::get_settings_sender() {
             let _ = tx.send(change);
         }
     }
 
-    /// Render the settings window UI.
     fn view(&self) -> Element<'_, Message> {
-        let nav_panel = self.nav_panel();
-        let content = self.content_area();
-
-        row![nav_panel, content].into()
+        row![self.nav_panel(), self.content_area()].into()
     }
 
-    /// Keyboard subscription: Escape closes the window.
     fn subscription(&self) -> Subscription<Message> {
         keyboard::on_key_press(|key, _modifiers| match key {
             keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::CloseWindow),
@@ -293,7 +245,6 @@ impl SettingsApp {
         })
     }
 
-    /// Returns the iced Theme based on user's selection.
     fn theme(&self) -> Theme {
         match self.theme_vm.selected_theme {
             ThemeOption::Win11Light => Theme::Light,
@@ -308,9 +259,10 @@ impl SettingsApp {
         }
     }
 
-    // ─── UI Components ───────────────────────────────────────────────────────
+    fn title(&self) -> String {
+        self.i18n.get("settings_window_title").to_string()
+    }
 
-    /// Left navigation panel (fixed 240px width).
     fn nav_panel(&self) -> Element<'_, Message> {
         let nav_items: Vec<Element<'_, Message>> = SettingsPage::ALL
             .iter()
@@ -333,10 +285,9 @@ impl SettingsApp {
             .into()
     }
 
-    /// Single navigation item button.
     fn nav_item(&self, page: SettingsPage) -> Element<'_, Message> {
         let is_selected = self.current_page == page;
-        let label = text(page.label()).size(14);
+        let label = text(self.i18n.get(page.label_key())).size(14);
 
         let btn = button(label)
             .on_press(Message::NavigateTo(page))
@@ -370,24 +321,13 @@ impl SettingsApp {
         }
     }
 
-    /// Right content area — dispatches to the correct page view.
     fn content_area(&self) -> Element<'_, Message> {
         let page_content: Element<'_, Message> = match self.current_page {
-            SettingsPage::General => {
-                views::page_general::view(&self.general_vm).map(Message::General)
-            }
-            SettingsPage::Theme => {
-                views::page_theme::view(&self.theme_vm).map(Message::Theme)
-            }
-            SettingsPage::Hotkey => {
-                views::page_hotkey::view(&self.hotkey_vm).map(Message::Hotkey)
-            }
-            SettingsPage::Plugin => {
-                views::page_plugin::view(&self.plugin_vm).map(Message::Plugin)
-            }
-            SettingsPage::About => {
-                views::page_about::view(&self.about_vm).map(Message::About)
-            }
+            SettingsPage::General => views::page_general::view(&self.general_vm, &self.i18n).map(Message::General),
+            SettingsPage::Theme => views::page_theme::view(&self.theme_vm, &self.i18n).map(Message::Theme),
+            SettingsPage::Hotkey => views::page_hotkey::view(&self.hotkey_vm, &self.i18n).map(Message::Hotkey),
+            SettingsPage::Plugin => views::page_plugin::view(&self.plugin_vm, &self.i18n).map(Message::Plugin),
+            SettingsPage::About => views::page_about::view(&self.about_vm, &self.i18n).map(Message::About),
         };
 
         container(page_content)
@@ -397,13 +337,8 @@ impl SettingsApp {
     }
 }
 
-// ─── Entry Point ─────────────────────────────────────────────────────────────
-
-/// Launch the settings window as an iced application.
-///
-/// This function blocks until the window is closed.
 pub fn run_settings_app(settings: Arc<RwLock<Settings>>, plugin_infos: Vec<PluginInfo>) -> iced::Result {
-    iced::application("EasySearch 设置", SettingsApp::update, SettingsApp::view)
+    iced::application(SettingsApp::title, SettingsApp::update, SettingsApp::view)
         .subscription(SettingsApp::subscription)
         .theme(SettingsApp::theme)
         .window_size(Size::new(940.0, 600.0))
@@ -413,8 +348,6 @@ pub fn run_settings_app(settings: Arc<RwLock<Settings>>, plugin_infos: Vec<Plugi
         })
         .run_with(move || SettingsApp::new(settings, plugin_infos))
 }
-
-// ─── Conversion Helpers ──────────────────────────────────────────────────────
 
 fn language_from_code(code: &str) -> Language {
     match code {
@@ -448,7 +381,6 @@ fn theme_to_name(theme: &ThemeOption) -> String {
     }
 }
 
-/// Detect Windows system dark mode via registry.
 fn is_system_dark_mode() -> bool {
     #[cfg(windows)]
     {
@@ -499,7 +431,7 @@ fn is_system_dark_mode() -> bool {
             let _ = RegCloseKey(hkey);
 
             if result.is_ok() {
-                return data == 0; // 0 = dark mode, 1 = light mode
+                return data == 0;
             }
         }
         false

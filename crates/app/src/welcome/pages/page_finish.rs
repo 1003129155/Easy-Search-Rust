@@ -1,23 +1,23 @@
 // Copyright (c) 2025-2026 LIJIALU. MIT License.
 
-//! Welcome wizard — Page 5: Autostart toggle + finish.
+//! Welcome wizard page 5.
 
 use iced::widget::{checkbox, column, text, Space};
 use iced::{Element, Length};
 
+use crate::i18n::engine::I18nEngine;
 use crate::welcome::app::Message;
 use crate::welcome::state::WelcomeState;
 
-/// Render the finish page.
-pub fn view(state: &WelcomeState) -> Element<'_, Message> {
-    let title = text("准备就绪！").size(24);
-    let desc = text("EasySearch 已经准备好为你服务。").size(14);
+pub fn view<'a>(state: &'a WelcomeState, i18n: &'a I18nEngine) -> Element<'a, Message> {
+    let title = text(i18n.get("welcome_finish_title")).size(24);
+    let desc = text(i18n.get("welcome_finish_desc")).size(14);
 
-    let autostart_toggle = checkbox("开机时自动启动 EasySearch", state.autostart)
+    let autostart_toggle = checkbox(i18n.get("welcome_finish_autostart"), state.autostart)
         .on_toggle(Message::ToggleAutostart)
         .size(18);
 
-    let hint = text("点击「完成」开始使用 EasySearch。").size(12);
+    let hint = text(i18n.get("welcome_finish_hint")).size(12);
 
     column![
         Space::with_height(40),

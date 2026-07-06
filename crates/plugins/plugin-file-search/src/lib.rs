@@ -5,10 +5,16 @@
 //! This is a thin adapter — it takes user input, calls `SearchEngine::search()`,
 //! and converts `EsSearchResult` into `PluginResult`.
 
+use std::path::Path;
 use std::sync::Arc;
 
-use easysearch_core::{Action, EsSearchResult, Plugin, PluginResult};
-use easysearch_engine::SearchEngine;
+use easysearch_core::{
+    Action, ContextAction, ContextData, EsSearchResult, Plugin, PluginResult,
+};
+use easysearch_engine::{SearchEngine, SearchFilter, SearchQuery};
+use quick_launch_store::global_store;
+
+const MAX_FILE_RESULTS: usize = 50;
 
 /// File search plugin that wraps the search engine.
 pub struct FileSearchPlugin {
@@ -43,7 +49,19 @@ impl Plugin for FileSearchPlugin {
             return Vec::new();
         }
 
-        let results = self.engine.search(q, 8);
+        // Path-prefix search mode: "\C:\path\" lists all items under that directory.
+        if q.starts_with('\\') {
+            let prefix = q.trim_start_matches('\\');
+            let search_query = SearchQuery::new("", MAX_FILE_RESULTS)
+                .with_filter(SearchFilter {
+                    path_prefix: Some(prefix.to_string()),
+                    ..Default::default()
+                });
+            let results = self.engine.search_query(&search_query);
+            return results.into_iter().map(|r| es_result_to_plugin(r)).collect();
+        }
+
+        let results = self.engine.search(q, MAX_FILE_RESULTS);
         results.into_iter().map(|r| es_result_to_plugin(r)).collect()
     }
 
@@ -54,11 +72,16 @@ impl Plugin for FileSearchPlugin {
 
 fn es_result_to_plugin(r: EsSearchResult) -> PluginResult {
     let full_path = r.path.clone();
+    let parent_path = Path::new(&full_path)
+        .parent()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_default();
     let icon = if r.is_directory {
         String::from("folder")
     } else {
         full_path.clone() // GUI will extract icon from file extension/path
     };
+    let context_actions = build_context_actions(&r.name, &full_path, r.is_directory, &parent_path);
 
     PluginResult {
         title: r.name,
@@ -66,5 +89,99 @@ fn es_result_to_plugin(r: EsSearchResult) -> PluginResult {
         icon,
         action: Action::Open(full_path),
         score: r.score,
+        highlight: r.highlight,
+        context_actions,
+        context_data: Some(ContextData {
+            is_directory: r.is_directory,
+            file_path: r.path,
+            parent_path,
+        }),
     }
+}
+
+fn build_context_actions(
+    title: &str,
+    path: &str,
+    is_directory: bool,
+    parent_path: &str,
+) -> Vec<ContextAction> {
+    let is_saved = global_store()
+        .lock()
+        .map(|store| store.contains(path))
+        .unwrap_or(false);
+
+    let mut actions = vec![
+        ContextAction {
+            label: if is_directory {
+                "Open folder".to_string()
+            } else {
+                "Open file".to_string()
+            },
+            action: Action::Open(path.to_string()),
+            shortcut_hint: "Enter".to_string(),
+        },
+        ContextAction {
+            label: if is_directory {
+                "Open parent folder".to_string()
+            } else {
+                "Open containing folder".to_string()
+            },
+            action: if is_directory {
+                Action::OpenParentFolder(path.to_string())
+            } else {
+                Action::OpenContainingFolder(path.to_string())
+            },
+            shortcut_hint: "Ctrl+Enter".to_string(),
+        },
+    ];
+
+    if !is_directory && !parent_path.is_empty() {
+        actions.push(ContextAction {
+            label: "Open parent folder".to_string(),
+            action: Action::OpenParentFolder(path.to_string()),
+            shortcut_hint: String::new(),
+        });
+    }
+
+    actions.push(ContextAction {
+        label: "Copy path".to_string(),
+        action: Action::Copy(path.to_string()),
+        shortcut_hint: String::new(),
+    });
+    actions.push(ContextAction {
+        label: "Copy name".to_string(),
+        action: Action::Copy(title.to_string()),
+        shortcut_hint: String::new(),
+    });
+    actions.push(ContextAction {
+        label: if is_saved {
+            "Remove from Quick Launch".to_string()
+        } else {
+            "Add to Quick Launch".to_string()
+        },
+        action: Action::ToggleQuickLaunch {
+            path: path.to_string(),
+            title: title.to_string(),
+        },
+        shortcut_hint: String::new(),
+    });
+    actions.push(ContextAction {
+        label: "Search in this folder".to_string(),
+        action: Action::EnterPathSearch(if is_directory {
+            path.to_string()
+        } else {
+            parent_path.to_string()
+        }),
+        shortcut_hint: String::new(),
+    });
+    actions.push(ContextAction {
+        label: "Windows context menu".to_string(),
+        action: Action::ShowFileContextMenu {
+            path: path.to_string(),
+            is_dir: is_directory,
+        },
+        shortcut_hint: "Alt+Enter".to_string(),
+    });
+
+    actions
 }

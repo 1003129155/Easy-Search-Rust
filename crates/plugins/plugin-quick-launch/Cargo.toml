@@ -1,0 +1,10 @@
+[package]
+name = "plugin-quick-launch"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+easysearch-core = { path = "../../core" }
+quick-launch-store = { path = "../../quick-launch-store" }

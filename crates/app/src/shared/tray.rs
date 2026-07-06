@@ -1,6 +1,6 @@
 // Copyright (c) 2025-2026 LIJIALU. MIT License.
 
-//! System tray icon management with context menu (Settings, Exit).
+//! System tray icon management with localized context menu.
 
 #[cfg(windows)]
 use windows::Win32::Foundation::HWND;
@@ -11,19 +11,28 @@ use windows::Win32::UI::Shell::{
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{LoadIconW, IDI_APPLICATION};
 
-/// Custom message for tray icon callbacks.
-pub const WM_TRAY_ICON: u32 = 0x0400 + 100; // WM_USER + 100
-
-/// Context menu command IDs.
+pub const WM_TRAY_ICON: u32 = 0x0400 + 100;
 pub const IDM_SETTINGS: u32 = 2001;
 pub const IDM_EXIT: u32 = 2002;
 
-/// Tray icon ID.
 const TRAY_ID: u32 = 1;
 
-/// Add a system tray icon for the window.
+fn current_i18n() -> crate::i18n::engine::I18nEngine {
+    let locale = crate::SHARED_SETTINGS
+        .get()
+        .and_then(|settings| settings.read().ok().map(|s| s.language.clone()))
+        .filter(|locale| !locale.is_empty());
+
+    match locale {
+        Some(locale) => crate::i18n::engine::I18nEngine::with_locale(&locale),
+        None => crate::i18n::engine::I18nEngine::new(),
+    }
+}
+
 #[cfg(windows)]
 pub fn add_tray_icon(hwnd: HWND) -> bool {
+    let i18n = current_i18n();
+
     unsafe {
         let icon = LoadIconW(None, IDI_APPLICATION).unwrap_or_default();
 
@@ -37,9 +46,7 @@ pub fn add_tray_icon(hwnd: HWND) -> bool {
             ..Default::default()
         };
 
-        // Set tooltip: "EasySearch"
-        let tip = "EasySearch";
-        let tip_wide: Vec<u16> = tip.encode_utf16().collect();
+        let tip_wide: Vec<u16> = i18n.get("tray_tooltip").encode_utf16().collect();
         let len = tip_wide.len().min(nid.szTip.len() - 1);
         nid.szTip[..len].copy_from_slice(&tip_wide[..len]);
 
@@ -47,7 +54,6 @@ pub fn add_tray_icon(hwnd: HWND) -> bool {
     }
 }
 
-/// Remove the system tray icon.
 #[cfg(windows)]
 pub fn remove_tray_icon(hwnd: HWND) {
     unsafe {
@@ -61,25 +67,44 @@ pub fn remove_tray_icon(hwnd: HWND) {
     }
 }
 
-/// Show the tray right-click context menu with "Settings" and "Exit" items.
 #[cfg(windows)]
 pub fn show_context_menu(hwnd: HWND) {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, SetForegroundWindow,
-        TrackPopupMenu, MF_STRING, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
-    };
     use windows::Win32::Foundation::POINT;
-    use windows::core::w;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, MF_STRING, SetForegroundWindow,
+        TPM_BOTTOMALIGN, TPM_LEFTALIGN, TrackPopupMenu,
+    };
+
+    let i18n = current_i18n();
+    let settings_label: Vec<u16> = i18n
+        .get("tray_settings")
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let exit_label: Vec<u16> = i18n
+        .get("tray_exit")
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
 
     unsafe {
         let hmenu = CreatePopupMenu().unwrap_or_default();
-        let _ = AppendMenuW(hmenu, MF_STRING, IDM_SETTINGS as usize, w!("Settings"));
-        let _ = AppendMenuW(hmenu, MF_STRING, IDM_EXIT as usize, w!("Exit"));
+        let _ = AppendMenuW(
+            hmenu,
+            MF_STRING,
+            IDM_SETTINGS as usize,
+            windows::core::PCWSTR(settings_label.as_ptr()),
+        );
+        let _ = AppendMenuW(
+            hmenu,
+            MF_STRING,
+            IDM_EXIT as usize,
+            windows::core::PCWSTR(exit_label.as_ptr()),
+        );
 
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
 
-        // Required: SetForegroundWindow so the menu dismisses when clicking away
         let _ = SetForegroundWindow(hwnd);
         let _ = TrackPopupMenu(
             hmenu,

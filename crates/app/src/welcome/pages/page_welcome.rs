@@ -1,33 +1,29 @@
 // Copyright (c) 2025-2026 LIJIALU. MIT License.
 
-//! Welcome wizard — Page 1: Welcome text + language selection.
+//! Welcome wizard page 1.
 
 use iced::widget::{column, pick_list, text, Space};
 use iced::{Element, Length};
 
+use crate::i18n::engine::I18nEngine;
 use crate::welcome::app::Message;
 use crate::welcome::state::WelcomeState;
 
-/// Available language options for the pick list.
 const LANGUAGES: &[&str] = &["zh-CN", "en", "ja"];
 
-/// Render the welcome page.
-pub fn view(state: &WelcomeState) -> Element<'_, Message> {
-    let title = text("欢迎使用 EasySearch").size(28);
-    let subtitle = text("快速文件搜索工具，为你而设计").size(16);
-    let lang_label = text("选择界面语言：").size(14);
+pub fn view<'a>(state: &'a WelcomeState, i18n: &'a I18nEngine) -> Element<'a, Message> {
+    let title = text(i18n.get("welcome_title")).size(28);
+    let subtitle = text(i18n.get("welcome_subtitle")).size(16);
+    let lang_label = text(i18n.get("welcome_language_label")).size(14);
 
-    let selected = LANGUAGES
-        .iter()
-        .find(|&&l| l == state.language)
-        .copied();
+    let selected = LANGUAGES.iter().find(|&&l| l == state.language).copied();
 
     let lang_picker = pick_list(
         LANGUAGES.to_vec(),
         selected,
         |s: &str| Message::SelectLanguage(s.to_string()),
     )
-    .placeholder("选择语言");
+    .placeholder(i18n.get("welcome_language_placeholder"));
 
     column![
         Space::with_height(40),

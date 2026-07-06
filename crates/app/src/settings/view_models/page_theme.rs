@@ -1,11 +1,6 @@
 // Copyright (c) 2025-2026 LIJIALU. MIT License.
 
-//! Theme settings page view model — theme list and selection.
-//!
-//! # Requirements
-//! - Req 2.5: User selects new theme in Setting_Window
-//! - Req 2.6: Built-in themes: Win11Light, Win11Dark, System
-//! - Req 3.5: Each Setting_Page has independent View + ViewModel
+//! Theme settings page view model.
 
 /// Available theme options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,12 +11,21 @@ pub enum ThemeOption {
 }
 
 impl ThemeOption {
-    /// Display label for the theme.
+    /// Stable display label used by the pick list widget.
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Win11Light => "Win11 Light",
-            Self::Win11Dark => "Win11 Dark",
-            Self::System => "跟随系统",
+            Self::Win11Light => "Light",
+            Self::Win11Dark => "Dark",
+            Self::System => "System",
+        }
+    }
+
+    /// Translation key for the theme label.
+    pub fn label_key(&self) -> &'static str {
+        match self {
+            Self::Win11Light => "settings_theme_light",
+            Self::Win11Dark => "settings_theme_dark",
+            Self::System => "settings_theme_system",
         }
     }
 

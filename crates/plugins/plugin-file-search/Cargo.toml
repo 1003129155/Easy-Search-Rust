@@ -8,3 +8,4 @@ publish = false
 [dependencies]
 easysearch-core = { path = "../../core" }
 easysearch-engine = { path = "../../engine" }
+quick-launch-store = { path = "../../quick-launch-store" }

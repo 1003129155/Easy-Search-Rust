@@ -1,19 +1,13 @@
 // Copyright (c) 2025-2026 LIJIALU. MIT License.
 
-//! Windows Settings plugin — data-driven, 524 settings entries.
+//! Windows Settings plugin.
 //!
-//! Loads settings from embedded JSON (from Flow.Launcher's data).
-//! Features:
-//! - 524 settings entries covering all Windows Settings areas
-//! - Alternative names (AltNames) for discovery
-//! - Area-based categorization
-//! - Fuzzy matching on Name, AltNames, Area, and Command
-//! - OS build filtering (hides unsupported settings)
+//! Loads settings from embedded JSON (ported from Flow.Launcher data).
 
 use easysearch_core::{Action, Plugin, PluginResult, SettingControl, SettingItem};
 use serde::Deserialize;
 
-/// Embedded JSON data (524 entries from Flow.Launcher).
+/// Embedded JSON data.
 const SETTINGS_JSON: &str = include_str!("data.json");
 
 /// A single Windows Setting entry from the JSON data.
@@ -61,7 +55,6 @@ impl WinSettingsPlugin {
     }
 
     /// Convert a PascalCase name to a human-readable display name.
-    /// "AccessWorkOrSchool" → "Access Work Or School"
     fn display_name(name: &str) -> String {
         let mut result = String::with_capacity(name.len() + 8);
         for (i, ch) in name.chars().enumerate() {
@@ -89,7 +82,6 @@ impl Plugin for WinSettingsPlugin {
         let q = query.trim().to_lowercase();
 
         if q.is_empty() {
-            // Show first N entries when no query
             return self
                 .entries
                 .iter()
@@ -99,7 +91,6 @@ impl Plugin for WinSettingsPlugin {
                 .collect();
         }
 
-        // Fuzzy match on name, alt_names, area, command
         let mut scored: Vec<(&SettingsEntry, u32)> = self
             .entries
             .iter()
@@ -108,10 +99,8 @@ impl Plugin for WinSettingsPlugin {
                 let display = Self::display_name(&e.name).to_lowercase();
                 let area_lower = e.area.to_lowercase();
 
-                // Score calculation
                 let mut score: u32 = 0;
 
-                // Exact prefix match on display name → highest
                 if display.starts_with(&q) {
                     score = 900;
                 } else if name_lower.contains(&q) {
@@ -123,7 +112,6 @@ impl Plugin for WinSettingsPlugin {
                 } else if e.command.to_lowercase().contains(&q) {
                     score = 500;
                 } else {
-                    // Check alt names
                     for alt in &e.alt_names {
                         if alt.to_lowercase().contains(&q) {
                             score = 700;
@@ -153,8 +141,25 @@ impl Plugin for WinSettingsPlugin {
         "WindowsSettings"
     }
 
+    fn display_name(&self, locale: &str) -> String {
+        match locale_prefix(locale) {
+            "zh" => "Windows 设置",
+            "ja" => "Windows 設定",
+            _ => "Windows Settings",
+        }
+        .to_string()
+    }
+
     fn description(&self) -> &str {
-        "快速打开 Windows 设置页面（524 项）"
+        "Open Windows settings pages and control panel entries"
+    }
+
+    fn description_for_locale(&self, locale: &str) -> String {
+        match locale_prefix(locale) {
+            "zh" => "快速打开 Windows 设置页和控制面板项目".to_string(),
+            "ja" => "Windows の設定ページやコントロールパネル項目をすばやく開きます".to_string(),
+            _ => self.description().to_string(),
+        }
     }
 
     fn icon(&self) -> &str {
@@ -162,10 +167,20 @@ impl Plugin for WinSettingsPlugin {
     }
 
     fn settings_schema(&self) -> Option<Vec<SettingItem>> {
+        self.settings_schema_for_locale("en")
+    }
+
+    fn settings_schema_for_locale(&self, locale: &str) -> Option<Vec<SettingItem>> {
+        let (label, description) = match locale_prefix(locale) {
+            "zh" => ("最大显示数量", "搜索结果最多显示多少条"),
+            "ja" => ("最大表示件数", "検索結果に表示する件数の上限です"),
+            _ => ("Maximum results", "How many Windows settings items to show at most"),
+        };
+
         Some(vec![SettingItem {
             key: "max_results".to_string(),
-            label: "最大显示数量".to_string(),
-            description: "搜索结果最多显示多少条".to_string(),
+            label: label.to_string(),
+            description: description.to_string(),
             control: SettingControl::Number {
                 min: 5,
                 max: 20,
@@ -176,7 +191,8 @@ impl Plugin for WinSettingsPlugin {
 
     fn on_setting_changed(&mut self, key: &str, value: &str) {
         if key == "max_results" {
-            if let Ok(v) = value.parse::<usize>() {
+            let raw = value.trim_matches('"');
+            if let Ok(v) = raw.parse::<usize>() {
                 self.max_results = v.clamp(5, 20);
             }
         }
@@ -192,7 +208,7 @@ fn entry_to_result(e: &SettingsEntry, score: u32) -> PluginResult {
     let subtitle = if e.area.is_empty() {
         e.command.clone()
     } else {
-        format!("{} — {}", e.area, e.command)
+        format!("{} - {}", e.area, e.command)
     };
 
     PluginResult {
@@ -201,14 +217,15 @@ fn entry_to_result(e: &SettingsEntry, score: u32) -> PluginResult {
         icon: String::from("settings"),
         action: Action::Open(e.command.clone()),
         score,
+        highlight: Vec::new(),
+        context_actions: Vec::new(),
+        context_data: None,
     }
 }
 
 /// Load and filter settings entries from embedded JSON.
 fn load_entries() -> Vec<SettingsEntry> {
     let entries: Vec<SettingsEntry> = serde_json::from_str(SETTINGS_JSON).unwrap_or_default();
-
-    // Filter by current OS build (optional — skip entries that don't apply)
     let current_build = get_windows_build();
 
     entries
@@ -224,7 +241,6 @@ fn load_entries() -> Vec<SettingsEntry> {
                     return false;
                 }
             }
-            // Must have a command
             !e.command.is_empty()
         })
         .collect()
@@ -234,7 +250,6 @@ fn load_entries() -> Vec<SettingsEntry> {
 fn get_windows_build() -> u32 {
     #[cfg(windows)]
     {
-        // Read from registry: HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\CurrentBuildNumber
         use std::os::windows::process::CommandExt;
         use std::process::Command;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -243,12 +258,12 @@ fn get_windows_build() -> u32 {
         command.args(["/c", "ver"]);
         command.creation_flags(CREATE_NO_WINDOW);
 
-        let output = command.output()
+        let output = command
+            .output()
             .ok()
             .and_then(|o| String::from_utf8(o.stdout).ok())
             .unwrap_or_default();
 
-        // Parse "Microsoft Windows [Version 10.0.22631.4890]" → 22631
         if let Some(start) = output.find("10.0.") {
             let rest = &output[start + 5..];
             if let Some(end) = rest.find(|c: char| !c.is_ascii_digit()) {
@@ -257,10 +272,14 @@ fn get_windows_build() -> u32 {
                 }
             }
         }
-        99999 // default: assume latest
+        99999
     }
     #[cfg(not(windows))]
     {
         99999
     }
+}
+
+fn locale_prefix(locale: &str) -> &str {
+    locale.split('-').next().unwrap_or(locale)
 }

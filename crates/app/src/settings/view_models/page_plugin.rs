@@ -67,7 +67,7 @@ impl PluginViewModel {
         self.plugins = plugins
             .into_iter()
             .map(|info| PluginEntry {
-                id: info.name.clone(),
+                id: info.id,
                 name: info.name,
                 description: info.description,
                 icon: info.icon,
@@ -114,6 +114,7 @@ impl PluginViewModel {
 /// Info extracted from a Plugin trait object for the settings UI.
 #[derive(Debug, Clone)]
 pub struct PluginInfo {
+    pub id: String,
     pub name: String,
     pub description: String,
     pub icon: String,

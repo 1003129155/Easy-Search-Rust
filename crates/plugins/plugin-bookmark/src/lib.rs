@@ -1,14 +1,13 @@
 // Copyright (c) 2025-2026 LIJIALU. MIT License.
 
-//! Browser bookmark search plugin — FL-grade implementation.
+//! Browser bookmark search plugin.
 //!
 //! Features:
 //! - Chrome, Edge, Brave, Opera, Vivaldi (Chromium-based)
 //! - Firefox (from places.sqlite backup JSON)
-//! - Multi-profile support (scans all User Data profiles, not just Default)
-//! - File monitoring: reloads bookmarks when bookmark files change (poll-based)
+//! - Multi-profile support
+//! - Poll-based bookmark refresh
 //! - Fuzzy matching on name and URL
-//! - Settings: enable/disable per browser, max results
 
 mod chromium;
 mod firefox;
@@ -107,7 +106,6 @@ impl Plugin for BookmarkPlugin {
     }
 
     fn matches(&self, query: &str) -> bool {
-        // Participate globally when query is at least 2 chars (avoid noise on single chars)
         query.trim().len() >= 2
     }
 
@@ -156,8 +154,25 @@ impl Plugin for BookmarkPlugin {
         "Bookmark"
     }
 
+    fn display_name(&self, locale: &str) -> String {
+        match locale_prefix(locale) {
+            "zh" => "书签",
+            "ja" => "ブックマーク",
+            _ => "Bookmark",
+        }
+        .to_string()
+    }
+
     fn description(&self) -> &str {
-        "搜索浏览器书签（Chrome/Edge/Brave/Firefox，多配置文件）"
+        "Search browser bookmarks across Chrome, Edge, Brave, and Firefox"
+    }
+
+    fn description_for_locale(&self, locale: &str) -> String {
+        match locale_prefix(locale) {
+            "zh" => "搜索 Chrome、Edge、Brave 和 Firefox 的浏览器书签".to_string(),
+            "ja" => "Chrome、Edge、Brave、Firefox のブラウザーブックマークを検索します".to_string(),
+            _ => self.description().to_string(),
+        }
     }
 
     fn icon(&self) -> &str {
@@ -165,35 +180,66 @@ impl Plugin for BookmarkPlugin {
     }
 
     fn settings_schema(&self) -> Option<Vec<SettingItem>> {
+        self.settings_schema_for_locale("en")
+    }
+
+    fn settings_schema_for_locale(&self, locale: &str) -> Option<Vec<SettingItem>> {
+        let texts = match locale_prefix(locale) {
+            "zh" => [
+                ("启用 Chrome", "加载 Google Chrome 书签"),
+                ("启用 Edge", "加载 Microsoft Edge 书签"),
+                ("启用 Brave", "加载 Brave 浏览器书签"),
+                ("启用 Firefox", "加载 Firefox 书签"),
+                ("最大结果数", "搜索结果最多显示多少条书签"),
+            ],
+            "ja" => [
+                ("Chrome を有効化", "Google Chrome のブックマークを読み込みます"),
+                ("Edge を有効化", "Microsoft Edge のブックマークを読み込みます"),
+                ("Brave を有効化", "Brave ブラウザーのブックマークを読み込みます"),
+                ("Firefox を有効化", "Firefox のブックマークを読み込みます"),
+                ("最大結果数", "検索結果に表示するブックマーク数の上限です"),
+            ],
+            _ => [
+                ("Enable Chrome", "Load Google Chrome bookmarks"),
+                ("Enable Edge", "Load Microsoft Edge bookmarks"),
+                ("Enable Brave", "Load Brave browser bookmarks"),
+                ("Enable Firefox", "Load Firefox bookmarks"),
+                (
+                    "Maximum results",
+                    "How many bookmarks to show at most in search results",
+                ),
+            ],
+        };
+
         Some(vec![
             SettingItem {
                 key: "enable_chrome".to_string(),
-                label: "启用 Chrome".to_string(),
-                description: "加载 Google Chrome 书签".to_string(),
+                label: texts[0].0.to_string(),
+                description: texts[0].1.to_string(),
                 control: SettingControl::Toggle { default: true },
             },
             SettingItem {
                 key: "enable_edge".to_string(),
-                label: "启用 Edge".to_string(),
-                description: "加载 Microsoft Edge 书签".to_string(),
+                label: texts[1].0.to_string(),
+                description: texts[1].1.to_string(),
                 control: SettingControl::Toggle { default: true },
             },
             SettingItem {
                 key: "enable_brave".to_string(),
-                label: "启用 Brave".to_string(),
-                description: "加载 Brave 浏览器书签".to_string(),
+                label: texts[2].0.to_string(),
+                description: texts[2].1.to_string(),
                 control: SettingControl::Toggle { default: true },
             },
             SettingItem {
                 key: "enable_firefox".to_string(),
-                label: "启用 Firefox".to_string(),
-                description: "加载 Firefox 书签".to_string(),
+                label: texts[3].0.to_string(),
+                description: texts[3].1.to_string(),
                 control: SettingControl::Toggle { default: true },
             },
             SettingItem {
                 key: "max_results".to_string(),
-                label: "最大结果数".to_string(),
-                description: "搜索结果最多显示多少条书签".to_string(),
+                label: texts[4].0.to_string(),
+                description: texts[4].1.to_string(),
                 control: SettingControl::Number {
                     min: 1,
                     max: 20,
@@ -205,14 +251,34 @@ impl Plugin for BookmarkPlugin {
 
     fn on_setting_changed(&mut self, key: &str, value: &str) {
         match key {
-            "enable_chrome" => { if let Ok(v) = serde_json::from_str(value) { self.settings.enable_chrome = v; } }
-            "enable_edge" => { if let Ok(v) = serde_json::from_str(value) { self.settings.enable_edge = v; } }
-            "enable_brave" => { if let Ok(v) = serde_json::from_str(value) { self.settings.enable_brave = v; } }
-            "enable_firefox" => { if let Ok(v) = serde_json::from_str(value) { self.settings.enable_firefox = v; } }
-            "max_results" => { if let Ok(v) = serde_json::from_str(value) { self.settings.max_results = v; } }
+            "enable_chrome" => {
+                if let Ok(v) = serde_json::from_str(value) {
+                    self.settings.enable_chrome = v;
+                }
+            }
+            "enable_edge" => {
+                if let Ok(v) = serde_json::from_str(value) {
+                    self.settings.enable_edge = v;
+                }
+            }
+            "enable_brave" => {
+                if let Ok(v) = serde_json::from_str(value) {
+                    self.settings.enable_brave = v;
+                }
+            }
+            "enable_firefox" => {
+                if let Ok(v) = serde_json::from_str(value) {
+                    self.settings.enable_firefox = v;
+                }
+            }
+            "max_results" => {
+                if let Ok(v) = serde_json::from_str(value) {
+                    self.settings.max_results = v;
+                }
+            }
             _ => {}
         }
-        // Trigger reload with new settings
+
         let new_bookmarks = load_all_bookmarks(&self.settings);
         if let Ok(mut lock) = self.bookmarks.lock() {
             *lock = new_bookmarks;
@@ -221,11 +287,26 @@ impl Plugin for BookmarkPlugin {
 
     fn setting_values(&self) -> Vec<(String, String)> {
         vec![
-            ("enable_chrome".to_string(), serde_json::to_string(&self.settings.enable_chrome).unwrap_or_default()),
-            ("enable_edge".to_string(), serde_json::to_string(&self.settings.enable_edge).unwrap_or_default()),
-            ("enable_brave".to_string(), serde_json::to_string(&self.settings.enable_brave).unwrap_or_default()),
-            ("enable_firefox".to_string(), serde_json::to_string(&self.settings.enable_firefox).unwrap_or_default()),
-            ("max_results".to_string(), serde_json::to_string(&self.settings.max_results).unwrap_or_default()),
+            (
+                "enable_chrome".to_string(),
+                serde_json::to_string(&self.settings.enable_chrome).unwrap_or_default(),
+            ),
+            (
+                "enable_edge".to_string(),
+                serde_json::to_string(&self.settings.enable_edge).unwrap_or_default(),
+            ),
+            (
+                "enable_brave".to_string(),
+                serde_json::to_string(&self.settings.enable_brave).unwrap_or_default(),
+            ),
+            (
+                "enable_firefox".to_string(),
+                serde_json::to_string(&self.settings.enable_firefox).unwrap_or_default(),
+            ),
+            (
+                "max_results".to_string(),
+                serde_json::to_string(&self.settings.max_results).unwrap_or_default(),
+            ),
         ]
     }
 }
@@ -233,10 +314,13 @@ impl Plugin for BookmarkPlugin {
 fn bookmark_to_result(b: &Bookmark, score: u32) -> PluginResult {
     PluginResult {
         title: b.name.clone(),
-        subtitle: format!("{} — {}", b.source, b.url),
+        subtitle: format!("{} - {}", b.source, b.url),
         icon: String::from("bookmark"),
         action: Action::Open(b.url.clone()),
         score,
+        highlight: Vec::new(),
+        context_actions: Vec::new(),
+        context_data: None,
     }
 }
 
@@ -246,20 +330,36 @@ fn load_all_bookmarks(settings: &BookmarkSettings) -> Vec<Bookmark> {
 
     if settings.enable_chrome {
         all.extend(chromium::load_chromium_bookmarks("Google/Chrome", "Chrome"));
-        all.extend(chromium::load_chromium_bookmarks("Google/Chrome SxS", "Chrome Canary"));
+        all.extend(chromium::load_chromium_bookmarks(
+            "Google/Chrome SxS",
+            "Chrome Canary",
+        ));
         all.extend(chromium::load_chromium_bookmarks("Chromium", "Chromium"));
     }
     if settings.enable_edge {
         all.extend(chromium::load_chromium_bookmarks("Microsoft/Edge", "Edge"));
-        all.extend(chromium::load_chromium_bookmarks("Microsoft/Edge Dev", "Edge Dev"));
-        all.extend(chromium::load_chromium_bookmarks("Microsoft/Edge SxS", "Edge Canary"));
+        all.extend(chromium::load_chromium_bookmarks(
+            "Microsoft/Edge Dev",
+            "Edge Dev",
+        ));
+        all.extend(chromium::load_chromium_bookmarks(
+            "Microsoft/Edge SxS",
+            "Edge Canary",
+        ));
     }
     if settings.enable_brave {
-        all.extend(chromium::load_chromium_bookmarks("BraveSoftware/Brave-Browser", "Brave"));
+        all.extend(chromium::load_chromium_bookmarks(
+            "BraveSoftware/Brave-Browser",
+            "Brave",
+        ));
     }
     if settings.enable_firefox {
         all.extend(firefox::load_firefox_bookmarks());
     }
 
     all
+}
+
+fn locale_prefix(locale: &str) -> &str {
+    locale.split('-').next().unwrap_or(locale)
 }

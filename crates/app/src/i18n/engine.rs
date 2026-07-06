@@ -1,6 +1,6 @@
 // Copyright (c) 2025-2026 LIJIALU. MIT License.
 
-//! I18n engine — JSON-based multi-language support with locale detection and fallback chain.
+//! I18n engine - JSON-based multi-language support with locale detection and fallback chain.
 
 use std::collections::HashMap;
 
@@ -12,9 +12,9 @@ const JA_JSON: &str = include_str!("locales/ja.json");
 /// Multi-language internationalization engine.
 ///
 /// Loads translations from embedded JSON locale files and provides key-based
-/// text lookup with a fallback chain: current locale → English → key itself.
+/// text lookup with a fallback chain: current locale -> English -> key itself.
 pub struct I18nEngine {
-    /// locale_code → (key → translated value)
+    /// locale_code -> (key -> translated value)
     translations: HashMap<String, HashMap<String, String>>,
     /// Currently active locale code (e.g. "en", "zh-CN", "ja")
     current_locale: String,
@@ -24,9 +24,6 @@ pub struct I18nEngine {
 
 impl I18nEngine {
     /// Create a new I18nEngine with system-detected locale.
-    ///
-    /// Loads all built-in locale files and selects the locale matching the
-    /// operating system's regional settings.
     pub fn new() -> Self {
         let mut engine = Self {
             translations: HashMap::new(),
@@ -53,20 +50,13 @@ impl I18nEngine {
     }
 
     /// Get translated text for the given key.
-    ///
-    /// Fallback chain:
-    /// 1. Look up in current locale
-    /// 2. If not found, look up in English ("en")
-    /// 3. If not found in English either, return the key itself
     pub fn get<'a>(&'a self, key: &'a str) -> &'a str {
-        // Try current locale
         if let Some(locale_map) = self.translations.get(&self.current_locale) {
             if let Some(value) = locale_map.get(key) {
                 return value.as_str();
             }
         }
 
-        // Fallback to English
         if self.current_locale != "en" {
             if let Some(en_map) = self.translations.get("en") {
                 if let Some(value) = en_map.get(key) {
@@ -75,24 +65,16 @@ impl I18nEngine {
             }
         }
 
-        // Final fallback: return the key itself
         key
     }
 
     /// Switch language at runtime.
-    ///
-    /// Matching rules:
-    /// 1. Exact match (e.g., "zh-CN" matches "zh-CN")
-    /// 2. Prefix match (e.g., "zh-TW" matches "zh-CN" since both start with "zh")
-    /// 3. If no match, default to "en"
     pub fn set_locale(&mut self, locale: &str) {
-        // 1. Exact match
         if self.translations.contains_key(locale) {
             self.current_locale = locale.to_string();
             return;
         }
 
-        // 2. Prefix match — extract language prefix (part before '-')
         let prefix = locale.split('-').next().unwrap_or(locale);
         for available in &self.available_locales {
             let available_prefix = available.split('-').next().unwrap_or(available);
@@ -102,7 +84,6 @@ impl I18nEngine {
             }
         }
 
-        // 3. Default to English
         self.current_locale = String::from("en");
     }
 
@@ -119,11 +100,6 @@ impl I18nEngine {
     }
 
     /// Detect system locale from Windows API.
-    ///
-    /// Reads the user's locale from the Windows registry
-    /// (`HKCU\Control Panel\International\LocaleName`).
-    /// Returns a locale string like "en-US", "zh-CN", "ja-JP", etc.
-    /// Falls back to "en" if detection fails.
     pub fn detect_system_locale() -> String {
         #[cfg(windows)]
         {
@@ -181,14 +157,12 @@ impl I18nEngine {
         String::from("en")
     }
 
-    /// Load all built-in locale JSON data into the translations map.
     fn load_builtin_locales(&mut self) {
         self.load_locale_json("en", EN_JSON);
         self.load_locale_json("zh-CN", ZH_CN_JSON);
         self.load_locale_json("ja", JA_JSON);
     }
 
-    /// Parse a JSON string and insert its key-value pairs for the given locale.
     fn load_locale_json(&mut self, locale_code: &str, json_data: &str) {
         if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(json_data) {
             self.translations.insert(locale_code.to_string(), map);
@@ -225,9 +199,7 @@ mod tests {
     #[test]
     fn test_get_fallback_to_en() {
         let engine = I18nEngine::with_locale("ja");
-        // Key exists in ja
-        assert_eq!(engine.get("placeholder_ready"), "検索...");
-        // Key doesn't exist anywhere — returns key itself
+        assert_eq!(engine.get("placeholder_ready"), "入力して検索...");
         assert_eq!(engine.get("nonexistent_key"), "nonexistent_key");
     }
 
@@ -248,7 +220,6 @@ mod tests {
     #[test]
     fn test_set_locale_prefix_match() {
         let mut engine = I18nEngine::with_locale("en");
-        // "zh-TW" should prefix-match to "zh-CN"
         engine.set_locale("zh-TW");
         assert_eq!(engine.current_locale(), "zh-CN");
     }

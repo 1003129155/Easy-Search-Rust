@@ -108,8 +108,16 @@ impl DriveManager {
             let results = index.search(query, limit);
             all_results.extend(results);
         }
-        // Sort by score descending and truncate
-        all_results.sort_unstable_by(|a, b| b.score.cmp(&a.score));
+        // Prefer stronger matches first, then shallower/shorter paths so
+        // broad queries keep predictable, user-near results near the top.
+        all_results.sort_unstable_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| path_depth(&left.path).cmp(&path_depth(&right.path)))
+                .then_with(|| left.path.len().cmp(&right.path.len()))
+                .then_with(|| left.path.to_lowercase().cmp(&right.path.to_lowercase()))
+        });
         all_results.truncate(limit);
         all_results
     }
@@ -131,6 +139,10 @@ impl DriveManager {
         }
         Ok(Vec::new())
     }
+}
+
+fn path_depth(path: &str) -> usize {
+    path.chars().filter(|&ch| ch == '\\' || ch == '/').count()
 }
 
 /// Build (or hot-load) the [`EsIndex`] for `drive_letter`.

@@ -274,7 +274,14 @@ impl SearchEngine {
         // Apply sort
         match query.sort {
             SortOrder::Score => {
-                results.sort_unstable_by(|a, b| b.score.cmp(&a.score));
+                results.sort_unstable_by(|left, right| {
+                    right
+                        .score
+                        .cmp(&left.score)
+                        .then_with(|| path_depth(&left.path).cmp(&path_depth(&right.path)))
+                        .then_with(|| left.path.len().cmp(&right.path.len()))
+                        .then_with(|| left.path.to_lowercase().cmp(&right.path.to_lowercase()))
+                });
             }
             SortOrder::Name => {
                 results.sort_unstable_by(|a, b| {
@@ -486,4 +493,8 @@ fn emit(tx: &Option<EventSender>, event: EngineEvent) {
     if let Some(sender) = tx {
         let _ = sender.send(event);
     }
+}
+
+fn path_depth(path: &str) -> usize {
+    path.chars().filter(|&ch| ch == '\\' || ch == '/').count()
 }

@@ -1,19 +1,19 @@
 // Copyright (c) 2025-2026 LIJIALU. MIT License.
 
-//! Welcome wizard — Page 2: Display activation hotkey.
+//! Welcome wizard page 2.
 
 use iced::widget::{column, text, Space};
 use iced::{Element, Length};
 
+use crate::i18n::engine::I18nEngine;
 use crate::welcome::app::Message;
 use crate::welcome::state::WelcomeState;
 
-/// Render the hotkey page.
-pub fn view(_state: &WelcomeState) -> Element<'_, Message> {
-    let title = text("唤起热键").size(24);
-    let desc = text("使用以下热键随时唤起 EasySearch 搜索窗口：").size(14);
+pub fn view<'a>(_state: &'a WelcomeState, i18n: &'a I18nEngine) -> Element<'a, Message> {
+    let title = text(i18n.get("welcome_hotkey_title")).size(24);
+    let desc = text(i18n.get("welcome_hotkey_desc")).size(14);
     let hotkey_display = text("Alt + Space").size(32);
-    let note = text("你可以稍后在设置中修改热键绑定。").size(12);
+    let note = text(i18n.get("welcome_hotkey_note")).size(12);
 
     column![
         Space::with_height(40),

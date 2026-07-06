@@ -34,7 +34,7 @@ fn init_log() {
     let file = OpenOptions::new()
         .create(true)
         .write(true)
-        .truncate(true)
+        .append(true)
         .open(&log_path)
         .expect("failed to open log file");
 
@@ -85,10 +85,7 @@ fn main() {
     }    log!("=== EasySearch GUI starting ===");
 
     // ── Load user settings ──────────────────────────────────────────────────
-    let settings_path = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("EasySearch")
-        .join("settings.json");
+    let settings_path = easysearch_core::paths::settings_file();
 
     // Check if first run (settings.json didn't exist → first launch)
     let is_first_run = !settings_path.exists();
@@ -155,16 +152,23 @@ fn main() {
 fn run_settings_subprocess() {
     log!("=== Settings subprocess starting ===");
 
-    let settings_path = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("EasySearch")
-        .join("settings.json");
+    let settings_path = easysearch_core::paths::settings_file();
 
     let settings = SettingsStore::load(&settings_path);
     let shared_settings = Arc::new(RwLock::new(settings));
 
     // Build plugin info list for the settings UI
-    let plugin_infos = build_plugin_infos();
+    let locale = shared_settings
+        .read()
+        .map(|settings| {
+            if settings.language.is_empty() {
+                I18nEngine::detect_system_locale()
+            } else {
+                settings.language.clone()
+            }
+        })
+        .unwrap_or_else(|_| String::from("en"));
+    let plugin_infos = build_plugin_infos_for_locale(&locale);
 
     // Run the iced settings app (blocks until window closes)
     match settings::app::run_settings_app(shared_settings, plugin_infos) {
@@ -176,7 +180,9 @@ fn run_settings_subprocess() {
 /// Build plugin info list for the settings UI by instantiating all plugins
 /// and extracting their metadata + settings schema.
 #[cfg(windows)]
-fn build_plugin_infos() -> Vec<settings::view_models::page_plugin::PluginInfo> {
+pub(crate) fn build_plugin_infos_for_locale(
+    locale: &str,
+) -> Vec<settings::view_models::page_plugin::PluginInfo> {
     use easysearch_core::Plugin;
     use settings::view_models::page_plugin::PluginInfo;
 
@@ -185,22 +191,26 @@ fn build_plugin_infos() -> Vec<settings::view_models::page_plugin::PluginInfo> {
         Box::new(plugin_program::ProgramPlugin::new()),
         Box::new(plugin_sys_cmd::SysCmdPlugin::new()),
         Box::new(plugin_win_settings::WinSettingsPlugin::new()),
+        Box::new(plugin_quick_launch::QuickLaunchPlugin::new()),
     ];
 
     plugins
         .iter()
         .map(|p| PluginInfo {
-            name: p.name().to_string(),
-            description: p.description().to_string(),
+            id: p.name().to_string(),
+            name: p.display_name(locale),
+            description: p.description_for_locale(locale),
             icon: p.icon().to_string(),
             keyword: p.default_keyword().map(|s| s.to_string()),
-            settings_schema: p.settings_schema(),
+            settings_schema: p.settings_schema_for_locale(locale),
             setting_values: p.setting_values(),
         })
         .collect()
 }
 
 #[cfg(not(windows))]
-fn build_plugin_infos() -> Vec<settings::view_models::page_plugin::PluginInfo> {
+pub(crate) fn build_plugin_infos_for_locale(
+    _locale: &str,
+) -> Vec<settings::view_models::page_plugin::PluginInfo> {
     Vec::new()
 }

@@ -22,6 +22,15 @@ pub struct PluginResult {
     pub action: Action,
     /// Relevance score (higher = better match).
     pub score: u32,
+    /// Highlight ranges as byte offsets `[start, len]` in `title`.
+    #[serde(default)]
+    pub highlight: Vec<[u32; 2]>,
+    /// Secondary actions available from the context actions page.
+    #[serde(default)]
+    pub context_actions: Vec<ContextAction>,
+    /// Optional metadata for building richer context actions in the app.
+    #[serde(default)]
+    pub context_data: Option<ContextData>,
 }
 
 /// What happens when a result is executed.
@@ -29,6 +38,12 @@ pub struct PluginResult {
 pub enum Action {
     /// Open a URL or file path via the system shell.
     Open(String),
+    /// Open the target's containing folder, selecting it when appropriate.
+    OpenContainingFolder(String),
+    /// Open the direct parent folder of the target.
+    OpenParentFolder(String),
+    /// Replace the current query with a filesystem path search.
+    EnterPathSearch(String),
     /// Copy text to the clipboard.
     Copy(String),
     /// Run a shell command.
@@ -37,8 +52,29 @@ pub enum Action {
     DaemonSearch(String),
     /// Execute a system command (shutdown, lock, etc.).
     SystemCommand(SystemCmd),
+    /// Add or remove an item from Quick Launch.
+    ToggleQuickLaunch { path: String, title: String },
+    /// Show the native Windows context menu for a file or folder.
+    ShowFileContextMenu { path: String, is_dir: bool },
     /// No action (informational result).
     None,
+}
+
+/// Secondary action entry shown in the context actions page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextAction {
+    pub label: String,
+    pub action: Action,
+    #[serde(default)]
+    pub shortcut_hint: String,
+}
+
+/// Metadata attached to a result so the app can build richer actions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextData {
+    pub is_directory: bool,
+    pub file_path: String,
+    pub parent_path: String,
 }
 
 /// System-level commands.
@@ -85,9 +121,19 @@ pub trait Plugin: Send + Sync {
     /// Human-readable name of this plugin.
     fn name(&self) -> &str;
 
+    /// Localized display name shown in UI surfaces.
+    fn display_name(&self, _locale: &str) -> String {
+        self.name().to_string()
+    }
+
     /// Plugin description shown in the settings panel.
     fn description(&self) -> &str {
         ""
+    }
+
+    /// Localized plugin description shown in UI surfaces.
+    fn description_for_locale(&self, _locale: &str) -> String {
+        self.description().to_string()
     }
 
     /// Plugin icon identifier.
@@ -108,6 +154,11 @@ pub trait Plugin: Send + Sync {
     /// Return `None` if the plugin has no configurable settings.
     fn settings_schema(&self) -> Option<Vec<SettingItem>> {
         None
+    }
+
+    /// Localized settings schema for the settings UI.
+    fn settings_schema_for_locale(&self, _locale: &str) -> Option<Vec<SettingItem>> {
+        self.settings_schema()
     }
 
     /// Plugin priority for result ranking. Higher priority plugins get their
@@ -240,11 +291,17 @@ impl Router {
 
     /// Get plugin metadata for the settings UI.
     pub fn plugin_infos(&self) -> Vec<PluginRouterInfo> {
+        self.plugin_infos_for_locale("en")
+    }
+
+    /// Get plugin metadata for the settings UI in a target locale.
+    pub fn plugin_infos_for_locale(&self, locale: &str) -> Vec<PluginRouterInfo> {
         self.plugins
             .iter()
             .map(|slot| PluginRouterInfo {
-                name: slot.plugin.name().to_string(),
-                description: slot.plugin.description().to_string(),
+                id: slot.plugin.name().to_string(),
+                name: slot.plugin.display_name(locale),
+                description: slot.plugin.description_for_locale(locale),
                 icon: slot.plugin.icon().to_string(),
                 keyword: slot.effective_keyword().map(|s| s.to_string()),
                 default_keyword: slot.plugin.default_keyword().map(|s| s.to_string()),
@@ -256,12 +313,17 @@ impl Router {
     /// Route a query to matching plugins and collect results from fast
     /// (non-background) plugins. Background plugins are skipped — use
     /// [`query_background`](Self::query_background) for those.
-    pub fn query_immediate(&self, raw_query: &str) -> Vec<PluginResult> {
+    ///
+    /// Returns `(results, keyword_matched)` — the second element indicates
+    /// whether a keyword-triggered plugin claimed this query. Pass it to
+    /// [`query_background`] so background global plugins are suppressed when
+    /// an immediate keyword plugin already handled the input.
+    pub fn query_immediate(&self, raw_query: &str) -> (Vec<PluginResult>, bool) {
         let mut results = Vec::new();
         let query_trimmed = raw_query.trim();
 
         if query_trimmed.is_empty() {
-            return results;
+            return (results, false);
         }
 
         let mut keyword_matched = false;
@@ -328,7 +390,7 @@ impl Router {
         }
 
         results.sort_by(|a, b| b.score.cmp(&a.score));
-        results
+        (results, keyword_matched)
     }
 
     /// Run background (expensive) plugins on a separate thread and return
@@ -339,9 +401,14 @@ impl Router {
     /// to abort the thread early (it checks between plugins).
     ///
     /// Returns `None` if there are no matching background plugins for this query.
+    ///
+    /// When `keyword_matched_immediate` is `true`, global (non-keyword)
+    /// background plugins are suppressed — only background plugins whose
+    /// keyword matches the query will run.
     pub fn query_background(
         &self,
         raw_query: &str,
+        keyword_matched_immediate: bool,
     ) -> Option<(std::sync::mpsc::Receiver<Vec<PluginResult>>, CancelToken)> {
         let query_trimmed = raw_query.trim().to_string();
         if query_trimmed.is_empty() {
@@ -380,7 +447,10 @@ impl Router {
             }
         }
 
-        if !keyword_matched {
+        // Skip global background plugins when an immediate keyword plugin
+        // already claimed the query (prevents file-search from overwriting
+        // plugin results like quick-launch, bookmark, etc.)
+        if !keyword_matched && !keyword_matched_immediate {
             for slot in &self.plugins {
                 if !slot.enabled || !slot.plugin.needs_background() {
                     continue;
@@ -435,7 +505,7 @@ impl Router {
     /// wrapper — calls both immediate and background synchronously).
     /// Prefer [`query_immediate`] + [`query_background`] for new code.
     pub fn query(&self, raw_query: &str) -> Vec<PluginResult> {
-        let mut results = self.query_immediate(raw_query);
+        let (mut results, immediate_keyword_matched) = self.query_immediate(raw_query);
 
         // Run background plugins inline (blocking — only for non-UI use)
         let query_trimmed = raw_query.trim().to_string();
@@ -474,7 +544,7 @@ impl Router {
             }
         }
 
-        if !keyword_matched {
+        if !keyword_matched && !immediate_keyword_matched {
             for slot in &self.plugins {
                 if !slot.enabled || !slot.plugin.needs_background() {
                     continue;
@@ -507,6 +577,7 @@ impl Router {
 /// Info about a registered plugin (for the settings UI).
 #[derive(Debug, Clone)]
 pub struct PluginRouterInfo {
+    pub id: String,
     pub name: String,
     pub description: String,
     pub icon: String,

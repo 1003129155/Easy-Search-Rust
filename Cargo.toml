@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/quick-launch-store",
     # ── 核心库 ──
     "crates/core",              # 索引/缓存/搜索算法
     "crates/engine",            # 嵌入式搜索引擎（多盘符、USN、事件通道）
@@ -21,6 +22,7 @@ members = [
     "crates/plugins/plugin-win-settings",
     "crates/plugins/plugin-file-search",
     "crates/plugins/plugin-indicator",
+    "crates/plugins/plugin-quick-launch",
 ]
 
 [workspace.package]

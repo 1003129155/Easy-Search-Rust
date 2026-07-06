@@ -18,11 +18,13 @@ impl EngineConfig {
     ///
     /// | Env var | Description |
     /// |---------|-------------|
-    /// | `EASYSEARCH_CACHE_DIR` | Override cache directory |
+    /// | `EASYSEARCH_CACHE_DIR` | Override cache directory (default: `%LOCALAPPDATA%\EasySearch\cache\flow\`) |
     /// | `EASYSEARCH_DRIVES` | Comma-separated drive letters to index (default: `C`) |
     #[must_use]
     pub fn from_env() -> Self {
-        let cache_dir = std::env::var_os("EASYSEARCH_CACHE_DIR").map(PathBuf::from);
+        let cache_dir = std::env::var_os("EASYSEARCH_CACHE_DIR")
+            .map(PathBuf::from)
+            .or_else(dirs_cache_dir);
 
         let auto_index_drives = std::env::var("EASYSEARCH_DRIVES")
             .unwrap_or_else(|_| String::from("C"))
@@ -57,12 +59,8 @@ impl Default for EngineConfig {
     }
 }
 
-/// Returns the default cache directory: `%LOCALAPPDATA%\EasySearch\cache`
+/// Returns the default cache directory for `.flowcache` files:
+/// `%LOCALAPPDATA%\EasySearch\cache\flow\`
 fn dirs_cache_dir() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA").map(|base| {
-        let mut p = PathBuf::from(base);
-        p.push("EasySearch");
-        p.push("cache");
-        p
-    })
+    Some(easysearch_core::paths::flow_cache_dir())
 }
