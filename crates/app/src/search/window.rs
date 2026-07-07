@@ -216,8 +216,13 @@ pub fn run() -> Result<(), String> {
     }
 
     // Create the popup window (initially hidden)
-    let width = layout::WINDOW_WIDTH as i32;
-    let height = layout::SEARCH_BAR_HEIGHT as i32;
+    // Use system DPI for initial sizing (we'll resize after hwnd is available)
+    let sys_dpi = unsafe {
+        windows::Win32::UI::HiDpi::GetDpiForSystem()
+    };
+    let dpi_factor = sys_dpi as f32 / 96.0;
+    let width = layout::scale_with(layout::WINDOW_WIDTH, dpi_factor);
+    let height = layout::scale_with(layout::SEARCH_BAR_HEIGHT, dpi_factor);
 
     let hwnd = unsafe {
         CreateWindowExW(
@@ -239,10 +244,23 @@ pub fn run() -> Result<(), String> {
     .map_err(|e| format!("CreateWindowExW failed: {e}"))?;
     crate::log!("Window handle created: {:?}", hwnd.0);
 
+    // Now that we have hwnd, get the actual per-monitor DPI and resize if different
+    let actual_width = layout::window_width_scaled(hwnd);
+    let actual_height = layout::scale(layout::SEARCH_BAR_HEIGHT, hwnd);
+    if actual_width != width || actual_height != height {
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd, None,
+                0, 0, actual_width, actual_height,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+
     // Initialize renderer
     let mut renderer = Renderer::new()?;
     crate::log!("Renderer created");
-    renderer.create_render_target(hwnd, width as u32, height as u32)?;
+    renderer.create_render_target(hwnd, actual_width as u32, actual_height as u32)?;
     crate::log!("Render target created");
 
     // Apply DWM window styling (Win11 round corners + shadow)
@@ -588,19 +606,130 @@ fn build_home_screen(
 fn recent_to_display(r: &super::history::RecentItem) -> DisplayItem {
     let action = history_key_to_action(&r.action_key);
     let icon_path = resolve_display_icon_ref(&r.icon, &action, r.is_directory);
+
+    // Build context actions for file-based history items (open:path, open-admin:path, etc.)
+    let (context_actions, context_data) = build_recent_context(&r.action_key, &r.title, r.is_directory);
+
     DisplayItem {
         title: r.title.clone(),
         subtitle: r.subtitle.clone(),
         icon: r.icon.clone(),
         shortcut: String::new(),
         action,
-        context_actions: Vec::new(),
-        context_data: None,
+        context_actions,
+        context_data,
         icon_path,
         is_directory: r.is_directory,
         highlight: Vec::new(),
         score: 0,
     }
+}
+
+/// Build context actions and context data for a recent history item.
+#[cfg(windows)]
+fn build_recent_context(
+    action_key: &str,
+    title: &str,
+    is_directory: bool,
+) -> (Vec<easysearch_core::ContextAction>, Option<easysearch_core::ContextData>) {
+    use easysearch_core::{Action, ContextAction, ContextData};
+    use easysearch_core::context_labels as cl;
+
+    // Extract file path from action key
+    let file_path = if let Some(path) = action_key.strip_prefix("open:") {
+        Some(path.to_string())
+    } else if let Some(path) = action_key.strip_prefix("open-admin:") {
+        Some(path.to_string())
+    } else if let Some(path) = action_key.strip_prefix("open-folder:") {
+        Some(path.to_string())
+    } else if let Some(path) = action_key.strip_prefix("open-parent:") {
+        Some(path.to_string())
+    } else {
+        None
+    };
+
+    let Some(path) = file_path else {
+        return (Vec::new(), None);
+    };
+
+    let parent_path = std::path::Path::new(&path)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let is_saved = global_store()
+        .lock()
+        .map(|store| store.contains(&path))
+        .unwrap_or(false);
+
+    let mut actions = vec![
+        ContextAction {
+            label: cl::open_item(is_directory),
+            action: Action::Open(path.clone()),
+            shortcut_hint: "Enter".to_string(),
+        },
+        ContextAction {
+            label: cl::open_containing_folder(is_directory),
+            action: if is_directory {
+                Action::OpenParentFolder(path.clone())
+            } else {
+                Action::OpenContainingFolder(path.clone())
+            },
+            shortcut_hint: "Ctrl+Enter".to_string(),
+        },
+    ];
+
+    if !is_directory && !parent_path.is_empty() {
+        actions.push(ContextAction {
+            label: cl::open_parent_folder(),
+            action: Action::OpenParentFolder(path.clone()),
+            shortcut_hint: String::new(),
+        });
+    }
+
+    actions.push(ContextAction {
+        label: cl::copy_path(),
+        action: Action::Copy(path.clone()),
+        shortcut_hint: String::new(),
+    });
+    actions.push(ContextAction {
+        label: cl::copy_name(),
+        action: Action::Copy(title.to_string()),
+        shortcut_hint: String::new(),
+    });
+    actions.push(ContextAction {
+        label: cl::toggle_quick_launch(is_saved),
+        action: Action::ToggleQuickLaunch {
+            path: path.clone(),
+            title: title.to_string(),
+        },
+        shortcut_hint: String::new(),
+    });
+    actions.push(ContextAction {
+        label: cl::search_in_folder(),
+        action: Action::EnterPathSearch(if is_directory {
+            path.clone()
+        } else {
+            parent_path.clone()
+        }),
+        shortcut_hint: String::new(),
+    });
+    actions.push(ContextAction {
+        label: cl::windows_context_menu(),
+        action: Action::ShowFileContextMenu {
+            path: path.clone(),
+            is_dir: is_directory,
+        },
+        shortcut_hint: "Alt+Enter".to_string(),
+    });
+
+    let context_data = ContextData {
+        is_directory,
+        file_path: path,
+        parent_path,
+    };
+
+    (actions, Some(context_data))
 }
 
 /// Inverse of [`action_to_history_key`]: parse an action key back to an [`Action`].
@@ -655,6 +784,7 @@ fn open_context_actions(app: &mut AppState) -> bool {
     app.context_selected_index = 0;
     app.view_mode = ViewMode::ContextActions;
     sync_active_items(app);
+    resize_for_results(app);
     true
 }
 
@@ -669,6 +799,7 @@ fn close_context_actions(app: &mut AppState) -> bool {
     app.context_selected_index = 0;
     app.context_source_index = None;
     sync_active_items(app);
+    resize_for_results(app);
     true
 }
 
@@ -1009,6 +1140,38 @@ unsafe extern "system" fn wnd_proc(
                 });
                 if is_visible {
                     hide_window();
+                    // Fallback: if hide_window couldn't acquire the borrow (RefCell contention),
+                    // the window might still be visible. Force-hide it at the Win32 level so
+                    // the user never sees a "ghost" window lingering without focus.
+                    let still_visible = unsafe { IsWindowVisible(hwnd) }.as_bool();
+                    if still_visible {
+                        crate::log!("WM_ACTIVATE: hide_window failed (borrow contention), force hiding via Win32");
+                        unsafe {
+                            let _ = ShowWindow(hwnd, SW_HIDE);
+                        }
+                        // Mark visible=false when the borrow becomes available
+                        APP_STATE.with(|state| {
+                            if let Ok(mut s) = state.try_borrow_mut() {
+                                if let Some(ref mut app) = *s {
+                                    if app.visible {
+                                        app.visible = false;
+                                        app.input.clear();
+                                        app.items.clear();
+                                        app.result_items.clear();
+                                        app.context_items.clear();
+                                        app.plugin_items.clear();
+                                        app.deferred_query = None;
+                                        app.selected_index = 0;
+                                        app.result_selected_index = 0;
+                                        app.context_selected_index = 0;
+                                        app.context_source_index = None;
+                                        app.view_mode = ViewMode::Results;
+                                        app.pending_ime_char_suppression = 0;
+                                    }
+                                }
+                            }
+                        });
+                    }
                 }
             }
             LRESULT(0)
@@ -1256,6 +1419,48 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
 
+        // ── DPI change detection (monitor switch / user settings change) ────
+        WM_DPICHANGED => {
+            // lparam contains a pointer to a RECT with the suggested new position
+            let suggested_rect = unsafe { &*(lparam.0 as *const RECT) };
+
+            // Recalculate window size using the new DPI (GetDpiForWindow will
+            // already reflect the new DPI when WM_DPICHANGED is received).
+            APP_STATE.with(|state| {
+                if let Ok(mut s) = state.try_borrow_mut() {
+                    if let Some(ref mut app) = *s {
+                        let has_preview = app.preview.is_some() && !app.items.is_empty();
+                        let new_width = layout::window_width_scaled(app.hwnd);
+                        let new_height = layout::window_height_with_preview_scaled(
+                            app.items.len(), has_preview, app.hwnd,
+                        );
+
+                        // Use suggested position from Windows, but our own calculated size
+                        unsafe {
+                            let _ = SetWindowPos(
+                                app.hwnd,
+                                None,
+                                suggested_rect.left,
+                                suggested_rect.top,
+                                new_width,
+                                new_height,
+                                SWP_NOZORDER | SWP_NOACTIVATE,
+                            );
+                        }
+
+                        app.renderer.resize(new_width as u32, new_height as u32);
+                        crate::log!(
+                            "WM_DPICHANGED: dpi_scale={:.2}, resized to {}x{}",
+                            layout::dpi_scale(app.hwnd), new_width, new_height
+                        );
+                    }
+                }
+            });
+
+            do_render();
+            LRESULT(0)
+        }
+
         // ── Theme change detection ──────────────────────────────────────────
         WM_SETTINGCHANGE => {
             // Windows broadcasts WM_SETTINGCHANGE when system theme changes.
@@ -1390,17 +1595,21 @@ fn handle_keydown(wparam: WPARAM) {
                 }
                 // Home-screen hint: fill the selected plugin's keyword into the
                 // input box (so the user can keep typing) instead of executing.
+                // Only applies to hint items (Action::None); history items with
+                // a real action should be executed directly.
                 if app.view_mode == ViewMode::Results
                     && app.input.text().trim().is_empty()
                     && !app.items.is_empty()
                 {
                     let idx = app.selected_index.min(app.items.len() - 1);
-                    let keyword = app.items[idx].title.trim().to_string();
-                    if !keyword.is_empty() {
-                        app.input.set_text(&format!("{keyword} "));
-                        app.input.move_end(false);
-                        on_input_changed(app);
-                        return DeferredAction::None;
+                    if matches!(app.items[idx].action, easysearch_core::Action::None) {
+                        let keyword = app.items[idx].title.trim().to_string();
+                        if !keyword.is_empty() {
+                            app.input.set_text(&format!("{keyword} "));
+                            app.input.move_end(false);
+                            on_input_changed(app);
+                            return DeferredAction::None;
+                        }
                     }
                 }
                 return DeferredAction::Execute;
@@ -1629,8 +1838,8 @@ fn on_input_changed(app: &mut AppState) {
 #[cfg(windows)]
 fn resize_for_results(app: &mut AppState) {
     let has_preview = app.preview.is_some() && !app.items.is_empty();
-    let height = layout::window_height_with_preview(app.items.len(), has_preview) as i32;
-    let width = layout::WINDOW_WIDTH as i32;
+    let height = layout::window_height_with_preview_scaled(app.items.len(), has_preview, app.hwnd);
+    let width = layout::window_width_scaled(app.hwnd);
 
     unsafe {
         let _ = SetWindowPos(
@@ -1695,6 +1904,9 @@ fn show_window_safe(hwnd: HWND) {
                     sync_active_items(app);
                     app.anim_frame = ANIM_TOTAL_FRAMES;
                 }
+                // Set visible=true BEFORE Win32 calls so that any WM_ACTIVATE(WA_INACTIVE)
+                // triggered during show sequence will correctly see visible==true and hide.
+                app.visible = true;
                 return app.items.len();
             }
         }
@@ -1726,8 +1938,8 @@ fn show_window_safe(hwnd: HWND) {
         let mon_width = work.right - work.left;
         let mon_height = work.bottom - work.top;
 
-        let width = layout::WINDOW_WIDTH as i32;
-        let height = layout::window_height(item_count) as i32;
+        let width = layout::window_width_scaled(hwnd);
+        let height = layout::window_height_scaled(item_count, hwnd);
         let x = work.left + (mon_width - width) / 2;
         let y = work.top + mon_height / 4;
 
@@ -1756,15 +1968,6 @@ fn show_window_safe(hwnd: HWND) {
             }
         }
     }
-
-    // Now it's safe to set visible=true (Win32 re-entrant messages have been processed)
-    APP_STATE.with(|state| {
-        if let Ok(mut s) = state.try_borrow_mut() {
-            if let Some(ref mut app) = *s {
-                app.visible = true;
-            }
-        }
-    });
 
     // Render the home-screen hints (or whatever items exist) immediately.
     do_render();
@@ -1833,8 +2036,8 @@ fn show_window(app: &mut AppState) {
         let mon_width = work.right - work.left;
         let mon_height = work.bottom - work.top;
 
-        let width = layout::WINDOW_WIDTH as i32;
-        let height = layout::window_height(app.items.len()) as i32;
+        let width = layout::window_width_scaled(app.hwnd);
+        let height = layout::window_height_scaled(app.items.len(), app.hwnd);
         let x = work.left + (mon_width - width) / 2;
         let y = work.top + mon_height / 4;
 

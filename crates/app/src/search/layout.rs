@@ -3,6 +3,34 @@
 //! Layout constants and calculations for the search window.
 //! Values are aligned with Flow.Launcher Win11Light theme.
 
+#[cfg(windows)]
+use windows::Win32::Foundation::HWND;
+
+/// Get DPI scale factor for a given window.
+/// Returns 1.0 for 96 DPI (100%), 1.25 for 120 DPI (125%), 1.5 for 144 DPI (150%), etc.
+#[cfg(windows)]
+pub fn dpi_scale(hwnd: HWND) -> f32 {
+    use windows::Win32::UI::HiDpi::GetDpiForWindow;
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    if dpi == 0 {
+        1.0
+    } else {
+        dpi as f32 / 96.0
+    }
+}
+
+/// Scale a logical pixel value to physical pixels for the given window's DPI.
+#[cfg(windows)]
+pub fn scale(value: f32, hwnd: HWND) -> i32 {
+    (value * dpi_scale(hwnd)).round() as i32
+}
+
+/// Scale a logical pixel value with a pre-computed DPI scale factor.
+#[cfg(windows)]
+pub fn scale_with(value: f32, dpi_factor: f32) -> i32 {
+    (value * dpi_factor).round() as i32
+}
+
 /// Height of the search input bar in pixels.
 /// Flow.Launcher: QueryBox Height=42 + padding = ~48px total area.
 pub const SEARCH_BAR_HEIGHT: f32 = 48.0;
@@ -111,4 +139,22 @@ pub fn window_height_with_preview(result_count: usize, has_preview: bool) -> f32
     } else {
         base
     }
+}
+
+/// Calculate total window height (physical pixels) scaled for the given window's DPI.
+#[cfg(windows)]
+pub fn window_height_scaled(result_count: usize, hwnd: HWND) -> i32 {
+    scale(window_height(result_count), hwnd)
+}
+
+/// Calculate total window height with preview (physical pixels) scaled for DPI.
+#[cfg(windows)]
+pub fn window_height_with_preview_scaled(result_count: usize, has_preview: bool, hwnd: HWND) -> i32 {
+    scale(window_height_with_preview(result_count, has_preview), hwnd)
+}
+
+/// Window width in physical pixels scaled for DPI.
+#[cfg(windows)]
+pub fn window_width_scaled(hwnd: HWND) -> i32 {
+    scale(WINDOW_WIDTH, hwnd)
 }

@@ -21,6 +21,13 @@ pub struct PollResult {
 ///
 /// Returns `Ok(PollResult)` on success, or `Err(reason)` when the
 /// drive/journal can't be read (non-fatal; the caller retries on next tick).
+///
+/// When the saved cursor (`last_usn`) points to a journal entry that has
+/// already been reclaimed (`ERROR_JOURNAL_ENTRY_DELETED`, OS error 1181),
+/// the cursor is automatically advanced to the journal's current
+/// `first_usn`. This means any changes between the old cursor and the new
+/// `first_usn` are lost — but polling resumes correctly instead of being
+/// stuck forever.
 #[cfg(windows)]
 pub fn poll_drive(drive_letter: char, last_usn: i64) -> Result<PollResult, String> {
     use uffs_mft::platform::DriveLetter;
@@ -33,15 +40,59 @@ pub fn poll_drive(drive_letter: char, last_usn: i64) -> Result<PollResult, Strin
         .map_err(|e| format!("query_usn_journal failed: {e}"))?;
 
     let start = Usn::new(last_usn);
-    let (records, next_usn) = read_usn_journal(drive, info.journal_id, start)
-        .map_err(|e| format!("read_usn_journal failed: {e}"))?;
-
-    let events = convert_records(&records);
-    Ok(PollResult {
-        events,
-        new_last_usn: next_usn.raw(),
-        journal_id: info.journal_id,
-    })
+    match read_usn_journal(drive, info.journal_id, start) {
+        Ok((records, next_usn)) => {
+            let events = convert_records(&records);
+            Ok(PollResult {
+                events,
+                new_last_usn: next_usn.raw(),
+                journal_id: info.journal_id,
+            })
+        }
+        Err(e) => {
+            // ERROR_JOURNAL_ENTRY_DELETED (1181): the saved cursor is too old,
+            // the journal has already reclaimed entries past our last_usn.
+            // Recovery: advance cursor to the journal's current first_usn so
+            // subsequent polls succeed. Some intermediate changes are lost but
+            // the alternative is polling being stuck forever.
+            const ERROR_JOURNAL_ENTRY_DELETED: i32 = 1181;
+            if e.raw_os_error() == Some(ERROR_JOURNAL_ENTRY_DELETED) {
+                eprintln!(
+                    "[easysearch-engine] {drive_letter}: journal cursor too old \
+                     (last_usn={last_usn}, journal first_usn={}). Advancing cursor.",
+                    info.first_usn.raw()
+                );
+                // Try reading from the journal's current first valid USN
+                let recovery_start = info.first_usn;
+                match read_usn_journal(drive, info.journal_id, recovery_start) {
+                    Ok((records, next_usn)) => {
+                        let events = convert_records(&records);
+                        Ok(PollResult {
+                            events,
+                            new_last_usn: next_usn.raw(),
+                            journal_id: info.journal_id,
+                        })
+                    }
+                    Err(e2) => {
+                        // Even recovery read failed — advance to next_usn
+                        // so at least we stop retrying the dead range.
+                        eprintln!(
+                            "[easysearch-engine] {drive_letter}: recovery read also failed: {e2}. \
+                             Advancing cursor to next_usn={}.",
+                            info.next_usn.raw()
+                        );
+                        Ok(PollResult {
+                            events: Vec::new(),
+                            new_last_usn: info.next_usn.raw(),
+                            journal_id: info.journal_id,
+                        })
+                    }
+                }
+            } else {
+                Err(format!("read_usn_journal failed: {e}"))
+            }
+        }
+    }
 }
 
 /// Non-Windows stub: journals are unavailable, so nothing to poll.

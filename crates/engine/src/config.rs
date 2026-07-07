@@ -19,22 +19,24 @@ impl EngineConfig {
     /// | Env var | Description |
     /// |---------|-------------|
     /// | `EASYSEARCH_CACHE_DIR` | Override cache directory (default: `%LOCALAPPDATA%\EasySearch\cache\flow\`) |
-    /// | `EASYSEARCH_DRIVES` | Comma-separated drive letters to index (default: `C`) |
+    /// | `EASYSEARCH_DRIVES` | Comma-separated drive letters to index (default: all fixed NTFS drives) |
     #[must_use]
     pub fn from_env() -> Self {
         let cache_dir = std::env::var_os("EASYSEARCH_CACHE_DIR")
             .map(PathBuf::from)
             .or_else(dirs_cache_dir);
 
-        let auto_index_drives = std::env::var("EASYSEARCH_DRIVES")
-            .unwrap_or_else(|_| String::from("C"))
-            .split(',')
-            .filter_map(|s| {
-                let trimmed = s.trim();
-                trimmed.chars().next().map(|c| c.to_ascii_uppercase())
-            })
-            .filter(|c| c.is_ascii_alphabetic())
-            .collect();
+        let auto_index_drives = match std::env::var("EASYSEARCH_DRIVES") {
+            Ok(val) => val
+                .split(',')
+                .filter_map(|s| {
+                    let trimmed = s.trim();
+                    trimmed.chars().next().map(|c| c.to_ascii_uppercase())
+                })
+                .filter(|c| c.is_ascii_alphabetic())
+                .collect(),
+            Err(_) => detect_all_fixed_drives(),
+        };
 
         Self {
             cache_dir,
@@ -57,6 +59,47 @@ impl Default for EngineConfig {
     fn default() -> Self {
         Self::from_env()
     }
+}
+
+/// Detect all fixed drives on the system using the Windows API.
+///
+/// Returns drive letters (e.g. `['C', 'D', 'E']`) for all fixed (non-removable,
+/// non-network) drives. Falls back to `['C']` on non-Windows or on failure.
+#[cfg(windows)]
+fn detect_all_fixed_drives() -> Vec<char> {
+    use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
+
+    /// DRIVE_FIXED = 3 (local hard disk)
+    const DRIVE_FIXED: u32 = 3;
+
+    let mask = unsafe { GetLogicalDrives() };
+    if mask == 0 {
+        return vec!['C'];
+    }
+
+    let mut drives = Vec::new();
+    for i in 0u32..26 {
+        if mask & (1 << i) != 0 {
+            let letter = (b'A' + i as u8) as char;
+            // Check if the drive is a fixed (local) drive
+            let root: Vec<u16> = format!("{}:\\\0", letter).encode_utf16().collect();
+            let drive_type = unsafe { GetDriveTypeW(windows::core::PCWSTR(root.as_ptr())) };
+            if drive_type == DRIVE_FIXED {
+                drives.push(letter);
+            }
+        }
+    }
+
+    if drives.is_empty() {
+        vec!['C']
+    } else {
+        drives
+    }
+}
+
+#[cfg(not(windows))]
+fn detect_all_fixed_drives() -> Vec<char> {
+    vec!['C']
 }
 
 /// Returns the default cache directory for `.flowcache` files:

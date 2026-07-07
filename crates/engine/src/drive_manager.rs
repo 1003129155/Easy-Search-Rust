@@ -183,11 +183,27 @@ fn build_index_windows(letter: char, cache_dir: Option<&Path>) -> Result<EsIndex
     if let Some(dir) = cache_dir {
         if let Some(volume_serial) = probe_volume_serial(letter) {
             match read_flow_cache(dir, volume_serial) {
-                Ok(Some(cached)) => match query_usn_journal(drive) {
+                Ok(Some(mut cached)) => match query_usn_journal(drive) {
                     Ok(info) => {
                         if cached.status.journal_id != 0
                             && cached.status.journal_id == info.journal_id
                         {
+                            // Validate that the cached cursor is still within the
+                            // journal's valid range. If the journal has wrapped and
+                            // our saved last_usn points to a reclaimed entry, advance
+                            // the cursor to the journal's current first_usn to avoid
+                            // ERROR_JOURNAL_ENTRY_DELETED (1181) on every poll.
+                            let cached_usn = uffs_mft::usn::Usn::new(cached.status.last_usn);
+                            if cached_usn < info.first_usn {
+                                eprintln!(
+                                    "[easysearch-engine] {letter}: cached cursor too old \
+                                     (last_usn={}, journal first_usn={}). Advancing to next_usn={}.",
+                                    cached.status.last_usn,
+                                    info.first_usn.raw(),
+                                    info.next_usn.raw()
+                                );
+                                cached.status.last_usn = info.next_usn.raw();
+                            }
                             eprintln!(
                                 "[easysearch-engine] {letter}: loaded from cache (journal_id={}, last_usn={}, records={})",
                                 cached.status.journal_id, cached.status.last_usn, cached.records_len()

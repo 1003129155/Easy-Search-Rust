@@ -53,7 +53,7 @@ pub struct Settings {
     #[serde(default)]
     pub autostart: bool,
 
-    /// Drive letters to index (e.g. ["C", "D"]). Empty means auto-detect.
+    /// Drive letters to index (e.g. ["C", "D"]). Empty means scan all fixed drives.
     #[serde(default)]
     pub index_drives: Vec<String>,
 }
