@@ -24,6 +24,9 @@ plugin-file-search = { path = "../plugins/plugin-file-search" }
 plugin-indicator = { path = "../plugins/plugin-indicator" }
 plugin-quick-launch = { path = "../plugins/plugin-quick-launch" }
 
+[build-dependencies]
+winresource = "0.1"
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
     "Win32_Foundation",

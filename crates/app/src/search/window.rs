@@ -72,7 +72,9 @@ const ANIM_TIMER_ID: usize = 101;
 #[cfg(windows)]
 const SETTINGS_POLL_TIMER_ID: usize = 102;
 
-/// Settings poll interval in milliseconds (2 seconds for file-based settings reload).
+/// Custom message: preview info loaded from background thread.
+#[cfg(windows)]
+const WM_PREVIEW_READY: u32 = WM_APP + 4;
 #[cfg(windows)]
 const SETTINGS_POLL_MS: u32 = 2000;
 
@@ -161,8 +163,10 @@ struct AppState {
     anim_frame: u8,
     /// Engine reference for hot-plug drive management.
     engine: Option<std::sync::Arc<easysearch_engine::SearchEngine>>,
-    /// Preview info for the currently selected file (loaded on selection change).
+    /// Preview info loaded asynchronously when context actions are opened.
     preview: Option<super::preview::PreviewInfo>,
+    /// Sequence ID for async preview loading (to discard stale results).
+    preview_seq: u64,
     /// Index progress status text (e.g. "Indexing C:..." or error messages).
     index_status: String,
     /// Last indexing error message (if any).
@@ -275,6 +279,16 @@ pub fn run() -> Result<(), String> {
 
     // Add tray icon
     tray::add_tray_icon(hwnd);
+
+    // Set window icon (for Alt-Tab and taskbar)
+    {
+        let app_icon = tray::load_app_icon();
+        unsafe {
+            SendMessageW(hwnd, WM_SETICON, Some(WPARAM(0)), Some(LPARAM(app_icon.0 as isize))); // ICON_SMALL
+            SendMessageW(hwnd, WM_SETICON, Some(WPARAM(1)), Some(LPARAM(app_icon.0 as isize))); // ICON_BIG
+        }
+    }
+
     crate::log!("Window created, tray icon added. Entering message loop...");
 
     // ── Initialize search engine ──────────────────────────────────────────────
@@ -407,6 +421,7 @@ pub fn run() -> Result<(), String> {
             anim_frame: ANIM_TOTAL_FRAMES, // Start fully visible (no animation on first load)
             engine: Some(engine_for_search.clone()),
             preview: None,
+            preview_seq: 0,
             index_status: String::new(),
             index_error: None,
             pending_ime_char_suppression: 0,
@@ -783,6 +798,34 @@ fn open_context_actions(app: &mut AppState) -> bool {
     app.context_items = context_items;
     app.context_selected_index = 0;
     app.view_mode = ViewMode::ContextActions;
+
+    // Start async preview loading for the source item
+    app.preview = None;
+    app.preview_seq += 1;
+    if let Some(ref path) = source.icon_path {
+        let path_owned = path.clone();
+        let hwnd_raw = app.hwnd.0 as usize;
+        let seq = app.preview_seq;
+        std::thread::Builder::new()
+            .name("preview-load".to_string())
+            .spawn(move || {
+                if let Some(info) = super::preview::PreviewInfo::from_path(&path_owned) {
+                    // Box it and pass pointer via LPARAM; seq via WPARAM
+                    let boxed = Box::into_raw(Box::new(info));
+                    unsafe {
+                        let hwnd = HWND(hwnd_raw as *mut _);
+                        let _ = PostMessageW(
+                            Some(hwnd),
+                            WM_PREVIEW_READY,
+                            WPARAM(seq as usize),
+                            LPARAM(boxed as isize),
+                        );
+                    }
+                }
+            })
+            .ok();
+    }
+
     sync_active_items(app);
     resize_for_results(app);
     true
@@ -798,6 +841,9 @@ fn close_context_actions(app: &mut AppState) -> bool {
     app.context_items.clear();
     app.context_selected_index = 0;
     app.context_source_index = None;
+    // Clear preview and bump seq to discard any in-flight result
+    app.preview = None;
+    app.preview_seq += 1;
     sync_active_items(app);
     resize_for_results(app);
     true
@@ -809,7 +855,6 @@ fn set_active_selection(app: &mut AppState, index: usize) {
     match app.view_mode {
         ViewMode::Results => {
             app.result_selected_index = app.selected_index;
-            update_preview(app);
         }
         ViewMode::ContextActions => {
             app.context_selected_index = app.selected_index;
@@ -1228,21 +1273,19 @@ unsafe extern "system" fn wnd_proc(
                                                 // Merge all results
                                                 immediate_items.extend(new_items);
 
-                                                // Deduplicate by (title, subtitle): keep the entry with higher score
-                                                {
-                                                    let mut seen = std::collections::HashMap::new();
-                                                    immediate_items.retain(|item| {
-                                                        let key = (item.title.clone(), item.subtitle.clone());
-                                                        match seen.get(&key) {
-                                                            Some(&existing_score) if existing_score >= item.score => false,
-                                                            _ => {
-                                                                seen.insert(key, item.score);
-                                                                true
-                                                            }
-                                                        }
-                                                    });
-                                                }
-
+                                                // Deduplicate by (title, subtitle): sort+dedup, zero allocation
+                                                // First sort by (title, subtitle) to group duplicates,
+                                                // within same group sort by score descending so highest is kept.
+                                                immediate_items.sort_by(|a, b| {
+                                                    a.title.cmp(&b.title)
+                                                        .then(a.subtitle.cmp(&b.subtitle))
+                                                        .then(b.score.cmp(&a.score))
+                                                });
+                                                // Adjacent dedup keeps the first (highest score) of each group
+                                                immediate_items.dedup_by(|b, a| {
+                                                    a.title == b.title && a.subtitle == b.subtitle
+                                                });
+                                                // Final sort by score descending for display order
                                                 immediate_items.sort_by(|a, b| b.score.cmp(&a.score));
 
                                                 // Move pinned items to the top
@@ -1307,8 +1350,8 @@ unsafe extern "system" fn wnd_proc(
                         }
                     });
                     unsafe { let _ = KillTimer(Some(hwnd), DEFERRED_POLL_TIMER_ID); }
+                    do_render();
                 }
-                do_render();
             } else if wparam.0 == ANIM_TIMER_ID {
                 // Advance animation frame
                 let done = APP_STATE.with(|state| {
@@ -1330,6 +1373,27 @@ unsafe extern "system" fn wnd_proc(
             } else if wparam.0 == SETTINGS_POLL_TIMER_ID {
                 poll_settings_changes(hwnd);
             }
+            LRESULT(0)
+        }
+
+        // ── Preview loaded from background thread ────────────────────────────
+        m if m == WM_PREVIEW_READY => {
+            let seq = wparam.0 as u64;
+            let ptr = lparam.0 as *mut super::preview::PreviewInfo;
+            // Reconstruct the Box to take ownership (and free on drop)
+            let info = unsafe { Box::from_raw(ptr) };
+            APP_STATE.with(|state| {
+                if let Ok(mut s) = state.try_borrow_mut() {
+                    if let Some(ref mut app) = *s {
+                        // Only accept if seq matches (not stale)
+                        if app.preview_seq == seq && app.view_mode == ViewMode::ContextActions {
+                            app.preview = Some(*info);
+                            resize_for_results(app);
+                        }
+                    }
+                }
+            });
+            do_render();
             LRESULT(0)
         }
 
@@ -1429,7 +1493,7 @@ unsafe extern "system" fn wnd_proc(
             APP_STATE.with(|state| {
                 if let Ok(mut s) = state.try_borrow_mut() {
                     if let Some(ref mut app) = *s {
-                        let has_preview = app.preview.is_some() && !app.items.is_empty();
+                        let has_preview = app.preview.is_some() && app.view_mode == ViewMode::ContextActions;
                         let new_width = layout::window_width_scaled(app.hwnd);
                         let new_height = layout::window_height_with_preview_scaled(
                             app.items.len(), has_preview, app.hwnd,
@@ -1629,7 +1693,6 @@ fn handle_keydown(wparam: WPARAM) {
                 match app.view_mode {
                     ViewMode::Results => {
                         app.result_selected_index = app.selected_index;
-                        update_preview(app);
                     }
                     ViewMode::ContextActions => {
                         app.context_selected_index = app.selected_index;
@@ -1648,7 +1711,6 @@ fn handle_keydown(wparam: WPARAM) {
                 match app.view_mode {
                     ViewMode::Results => {
                         app.result_selected_index = app.selected_index;
-                        update_preview(app);
                     }
                     ViewMode::ContextActions => {
                         app.context_selected_index = app.selected_index;
@@ -1743,8 +1805,8 @@ fn handle_keydown(wparam: WPARAM) {
             execute_selected_safe();
         }
         DeferredAction::OpenFolder => {
-            // Open the containing folder of the selected item
-            open_containing_folder_safe();
+            // Ctrl+Enter: for folders → open in Explorer; for files → open containing folder
+            open_folder_or_containing_safe();
         }
         DeferredAction::OpenContext => {
             APP_STATE.with(|state| {
@@ -1788,7 +1850,9 @@ fn on_input_changed(app: &mut AppState) {
     app.context_selected_index = 0;
     app.context_source_index = None;
     app.current_search_seq += 1;
-    app.preview = None; // Clear preview on new input
+    // Clear async preview
+    app.preview = None;
+    app.preview_seq += 1;
 
     // Cancel any pending deferred query
     app.deferred_query = None;
@@ -1837,7 +1901,7 @@ fn on_input_changed(app: &mut AppState) {
 /// Resize window to fit the current number of results.
 #[cfg(windows)]
 fn resize_for_results(app: &mut AppState) {
-    let has_preview = app.preview.is_some() && !app.items.is_empty();
+    let has_preview = app.preview.is_some() && app.view_mode == ViewMode::ContextActions;
     let height = layout::window_height_with_preview_scaled(app.items.len(), has_preview, app.hwnd);
     let width = layout::window_width_scaled(app.hwnd);
 
@@ -1946,6 +2010,12 @@ fn show_window_safe(hwnd: HWND) {
         crate::log!("show_window_safe: SetWindowPos x={x} y={y} w={width} h={height}");
         let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, width, height, SWP_NOACTIVATE);
 
+        // Pre-render content BEFORE showing the window so the first visible
+        // frame already has a fully-painted client area (avoids the "border
+        // appears before content" flash).
+        crate::log!("show_window_safe: pre-render before ShowWindow");
+        do_render();
+
         crate::log!("show_window_safe: ShowWindow(SW_SHOW)");
         let _ = ShowWindow(hwnd, SW_SHOW);
 
@@ -1969,8 +2039,6 @@ fn show_window_safe(hwnd: HWND) {
         }
     }
 
-    // Render the home-screen hints (or whatever items exist) immediately.
-    do_render();
     crate::log!("show_window_safe: done, visible=true");
 }
 
@@ -2075,6 +2143,8 @@ fn hide_window() {
         app.context_items.clear();
         app.plugin_items.clear();
         app.deferred_query = None;
+        app.preview = None;
+        app.preview_seq += 1;
         app.selected_index = 0;
         app.result_selected_index = 0;
         app.context_selected_index = 0;
@@ -2114,6 +2184,8 @@ fn hide_window_inner(app: &mut AppState) {
     app.context_items.clear();
     app.plugin_items.clear();
     app.deferred_query = None;
+    app.preview = None;
+    app.preview_seq += 1;
     app.selected_index = 0;
     app.result_selected_index = 0;
     app.context_selected_index = 0;
@@ -2160,36 +2232,45 @@ fn execute_selected_safe() {
     execute_action_safe(item.action, item.title, item.context_data);
 }
 
-/// Open the containing folder of the currently selected item (Ctrl+Enter).
-/// Uses Explorer's `/select,` syntax to highlight the file in its parent folder.
+/// Ctrl+Enter handler: for folders → open in Explorer; for files → open containing folder.
 #[cfg(windows)]
-fn open_containing_folder_safe() {
-    // Step 1: Extract the file path from the selected item
-    let path = APP_STATE.with(|state| {
+fn open_folder_or_containing_safe() {
+    let info = APP_STATE.with(|state| {
         let Ok(s) = state.try_borrow() else { return None; };
         let Some(ref app) = *s else { return None; };
         if app.items.is_empty() {
             return None;
         }
         let idx = app.selected_index.min(app.items.len() - 1);
-        app.items[idx]
+        let is_dir = app.items[idx]
+            .context_data
+            .as_ref()
+            .map(|data| data.is_directory)
+            .unwrap_or(false);
+        let path = app.items[idx]
             .context_data
             .as_ref()
             .map(|data| data.file_path.clone())
             .or_else(|| match &app.items[idx].action {
                 easysearch_core::Action::Open(p)
-                | easysearch_core::Action::OpenAsAdmin(p) => Some(p.clone()),
+                | easysearch_core::Action::OpenAsAdmin(p)
+                | easysearch_core::Action::EnterPathSearch(p) => Some(p.clone()),
                 _ => None,
-            })
+            });
+        path.map(|p| (p, is_dir))
     });
 
-    let Some(path) = path else { return; };
+    let Some((path, is_dir)) = info else { return; };
 
-    // Step 2: Hide window
     hide_window();
 
-    // Step 3: Open Explorer with the file selected
-    super::fs_actions::open_containing_folder(&path);
+    if is_dir {
+        // Folder: open it directly in Explorer
+        super::action::execute(&easysearch_core::Action::Open(path));
+    } else {
+        // File: open its containing folder with the file selected
+        super::fs_actions::open_containing_folder(&path);
+    }
 }
 
 #[cfg(windows)]
@@ -2317,29 +2398,7 @@ fn action_to_history_key(action: &easysearch_core::Action) -> String {
     }
 }
 
-/// Update the preview info for the currently selected item.
-#[cfg(windows)]
-fn update_preview(app: &mut AppState) {
-    let old_has_preview = app.preview.is_some();
-
-    if app.items.is_empty() {
-        app.preview = None;
-    } else {
-        let idx = app.selected_index.min(app.items.len() - 1);
-        // Only load preview for file/folder items (those with a path)
-        if let Some(ref path) = app.items[idx].icon_path {
-            app.preview = super::preview::PreviewInfo::from_path(path);
-        } else {
-            app.preview = None;
-        }
-    }
-
-    // Resize window if preview visibility changed
-    let new_has_preview = app.preview.is_some();
-    if old_has_preview != new_has_preview {
-        resize_for_results(app);
-    }
-}
+// Preview functionality removed — fs::metadata on UI thread caused sluggishness.
 
 /// Poll the settings file for changes and apply them.
 /// Reads settings.json from disk and compares with in-memory state.
@@ -2555,11 +2614,15 @@ fn do_render() {
             };
             let anim_progress = app.anim_frame as f32 / ANIM_TOTAL_FRAMES as f32;
 
-            // Prepare preview info to pass into the single render frame
-            let preview_param = if let Some(ref preview) = app.preview {
-                if !app.items.is_empty() {
-                    let results_height = layout::window_height(app.items.len());
-                    Some((preview, results_height))
+            // Show preview only in context actions mode
+            let preview_param = if app.view_mode == ViewMode::ContextActions {
+                if let Some(ref preview) = app.preview {
+                    if !app.items.is_empty() {
+                        let results_height = layout::window_height(app.items.len());
+                        Some((preview, results_height))
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }

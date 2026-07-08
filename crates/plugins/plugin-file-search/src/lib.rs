@@ -83,11 +83,18 @@ fn es_result_to_plugin(r: EsSearchResult) -> PluginResult {
     };
     let context_actions = build_context_actions(&r.name, &full_path, r.is_directory, &parent_path);
 
+    // Folders: Enter = navigate into (path search mode); Files: Enter = open
+    let action = if r.is_directory {
+        Action::EnterPathSearch(full_path.clone())
+    } else {
+        Action::Open(full_path.clone())
+    };
+
     PluginResult {
         title: r.name,
         subtitle: r.path.clone(),
         icon,
-        action: Action::Open(full_path),
+        action,
         score: r.score,
         highlight: r.highlight,
         context_actions,
@@ -112,29 +119,39 @@ fn build_context_actions(
         .map(|store| store.contains(path))
         .unwrap_or(false);
 
-    let mut actions = vec![
-        ContextAction {
-            label: cl::open_item(is_directory),
-            action: Action::Open(path.to_string()),
-            shortcut_hint: "Enter".to_string(),
-        },
-        ContextAction {
-            label: cl::open_containing_folder(is_directory),
-            action: if is_directory {
-                Action::OpenParentFolder(path.to_string())
-            } else {
-                Action::OpenContainingFolder(path.to_string())
-            },
-            shortcut_hint: "Ctrl+Enter".to_string(),
-        },
-    ];
+    let mut actions = Vec::new();
 
-    if !is_directory && !parent_path.is_empty() {
+    if is_directory {
+        // For folders: Enter = navigate into, so first context action is "Open in Explorer"
         actions.push(ContextAction {
-            label: cl::open_parent_folder(),
+            label: cl::open_item(true),
+            action: Action::Open(path.to_string()),
+            shortcut_hint: "Ctrl+Enter".to_string(),
+        });
+        actions.push(ContextAction {
+            label: cl::open_containing_folder(true),
             action: Action::OpenParentFolder(path.to_string()),
             shortcut_hint: String::new(),
         });
+    } else {
+        // For files: Enter = open file (unchanged)
+        actions.push(ContextAction {
+            label: cl::open_item(false),
+            action: Action::Open(path.to_string()),
+            shortcut_hint: "Enter".to_string(),
+        });
+        actions.push(ContextAction {
+            label: cl::open_containing_folder(false),
+            action: Action::OpenContainingFolder(path.to_string()),
+            shortcut_hint: "Ctrl+Enter".to_string(),
+        });
+        if !parent_path.is_empty() {
+            actions.push(ContextAction {
+                label: cl::open_parent_folder(),
+                action: Action::OpenParentFolder(path.to_string()),
+                shortcut_hint: String::new(),
+            });
+        }
     }
 
     actions.push(ContextAction {
@@ -155,15 +172,16 @@ fn build_context_actions(
         },
         shortcut_hint: String::new(),
     });
-    actions.push(ContextAction {
-        label: cl::search_in_folder(),
-        action: Action::EnterPathSearch(if is_directory {
-            path.to_string()
-        } else {
-            parent_path.to_string()
-        }),
-        shortcut_hint: String::new(),
-    });
+
+    // "Search in folder" — only for files (folders already use Enter to navigate)
+    if !is_directory && !parent_path.is_empty() {
+        actions.push(ContextAction {
+            label: cl::search_in_folder(),
+            action: Action::EnterPathSearch(parent_path.to_string()),
+            shortcut_hint: String::new(),
+        });
+    }
+
     actions.push(ContextAction {
         label: cl::windows_context_menu(),
         action: Action::ShowFileContextMenu {

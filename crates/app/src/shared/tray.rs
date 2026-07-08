@@ -9,13 +9,39 @@ use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
 };
 #[cfg(windows)]
-use windows::Win32::UI::WindowsAndMessaging::{LoadIconW, IDI_APPLICATION};
+use windows::Win32::UI::WindowsAndMessaging::{LoadIconW, LoadImageW, IDI_APPLICATION, IMAGE_ICON, LR_DEFAULTSIZE, LR_SHARED};
+#[cfg(windows)]
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+#[cfg(windows)]
+use windows::core::PCWSTR;
 
 pub const WM_TRAY_ICON: u32 = 0x0400 + 100;
 pub const IDM_SETTINGS: u32 = 2001;
 pub const IDM_EXIT: u32 = 2002;
 
 const TRAY_ID: u32 = 1;
+
+/// Load the embedded app icon (resource ID 1) from the current exe.
+/// Falls back to IDI_APPLICATION if not available.
+#[cfg(windows)]
+pub fn load_app_icon() -> windows::Win32::UI::WindowsAndMessaging::HICON {
+    unsafe {
+        let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
+        // MAKEINTRESOURCE(1) = resource ID 1
+        let icon_id = PCWSTR(1 as *const u16);
+        let hicon = LoadImageW(
+            Some(hinstance.into()),
+            icon_id,
+            IMAGE_ICON,
+            0, 0,
+            LR_DEFAULTSIZE | LR_SHARED,
+        );
+        match hicon {
+            Ok(h) => windows::Win32::UI::WindowsAndMessaging::HICON(h.0),
+            Err(_) => LoadIconW(None, IDI_APPLICATION).unwrap_or_default(),
+        }
+    }
+}
 
 fn current_i18n() -> crate::i18n::engine::I18nEngine {
     let locale = crate::SHARED_SETTINGS
@@ -34,7 +60,7 @@ pub fn add_tray_icon(hwnd: HWND) -> bool {
     let i18n = current_i18n();
 
     unsafe {
-        let icon = LoadIconW(None, IDI_APPLICATION).unwrap_or_default();
+        let icon = load_app_icon();
 
         let mut nid = NOTIFYICONDATAW {
             cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
