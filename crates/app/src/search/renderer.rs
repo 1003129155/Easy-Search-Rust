@@ -7,26 +7,26 @@
 use windows::Win32::Foundation::HWND;
 #[cfg(windows)]
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
+    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
 };
 #[cfg(windows)]
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Factory1, ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
     D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_PROPERTIES, D2D1_ROUNDED_RECT,
+    D2D1CreateFactory, ID2D1Factory1, ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
 };
 #[cfg(windows)]
 use windows::Win32::Graphics::DirectWrite::{
-    DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
-    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
-    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL,
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL,
+    DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat,
 };
 #[cfg(windows)]
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 #[cfg(windows)]
-use windows::core::PCWSTR;
-#[cfg(windows)]
 use windows::core::Interface;
+#[cfg(windows)]
+use windows::core::PCWSTR;
 #[cfg(windows)]
 use windows_numerics;
 
@@ -157,8 +157,11 @@ impl Renderer {
             ..Default::default()
         };
 
-        let rt = unsafe { self.factory.CreateHwndRenderTarget(&render_props, &hwnd_props) }
-            .map_err(|e| format!("CreateHwndRenderTarget failed: {e}"))?;
+        let rt = unsafe {
+            self.factory
+                .CreateHwndRenderTarget(&render_props, &hwnd_props)
+        }
+        .map_err(|e| format!("CreateHwndRenderTarget failed: {e}"))?;
 
         self.render_target = Some(rt);
         Ok(())
@@ -183,7 +186,8 @@ impl Renderer {
         selected_index: usize,
         placeholder: &str,
         icon_cache: &mut super::icon::IconCache,
-        _anim_progress: f32,
+        anim_progress: f32,
+        search_active: bool,
         preview: Option<(&super::preview::PreviewInfo, f32)>,
     ) {
         let Some(ref rt) = self.render_target else {
@@ -237,7 +241,12 @@ impl Renderer {
                     let x_start = self.measure_text_width(input_text, sel_start);
                     let x_end = self.measure_text_width(input_text, sel_end);
 
-                    let selection_color = Color { r: 0.26, g: 0.56, b: 0.96, a: 0.3 };
+                    let selection_color = Color {
+                        r: 0.26,
+                        g: 0.56,
+                        b: 0.96,
+                        a: 0.3,
+                    };
                     if let Ok(brush) = self.create_brush(rt, &selection_color) {
                         let sel_rect = D2D_RECT_F {
                             left: layout::PADDING_H + x_start,
@@ -298,6 +307,10 @@ impl Renderer {
                 }
             }
 
+            if search_active && !input_text.is_empty() {
+                self.draw_search_progress(rt, anim_progress);
+            }
+
             // Draw result items with scroll offset
             // Calculate which items are visible based on selected_index
             let total_items = items.len();
@@ -311,7 +324,8 @@ impl Renderer {
             let visible_end = (scroll_offset + max_visible).min(total_items);
             let visible_count = visible_end - visible_start;
 
-            let results_y_start = layout::SEARCH_BAR_HEIGHT + layout::SEPARATOR_HEIGHT + layout::RESULT_MARGIN_V;
+            let results_y_start =
+                layout::SEARCH_BAR_HEIGHT + layout::SEPARATOR_HEIGHT + layout::RESULT_MARGIN_V;
 
             for vi in 0..visible_count {
                 let item_index = visible_start + vi;
@@ -358,9 +372,7 @@ impl Renderer {
 
                 // ── Icon rendering ────────────────────────────────────────
                 // Flow.Launcher: 32x32 icon in the 60px icon area
-                // get_icon() always returns a bitmap (fallback to built-in placeholder)
                 if let Some(ref icon_path) = item.icon_path {
-                    let bitmap = icon_cache.get_icon(icon_path, item.is_directory, rt);
                     let icon_x = layout::ICON_LEFT + layout::ITEM_MARGIN_H;
                     let icon_y = y + (layout::ITEM_HEIGHT - layout::ICON_SIZE) / 2.0;
                     let icon_rect = D2D_RECT_F {
@@ -369,13 +381,20 @@ impl Renderer {
                         right: icon_x + layout::ICON_SIZE,
                         bottom: icon_y + layout::ICON_SIZE,
                     };
-                    rt.DrawBitmap(
-                        bitmap,
-                        Some(&icon_rect),
-                        opacity,
-                        windows::Win32::Graphics::Direct2D::D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                        None,
-                    );
+                    match icon_cache.get_icon_nonblocking(icon_path, item.is_directory, rt) {
+                        super::icon::IconLookup::Ready(bitmap) => {
+                            rt.DrawBitmap(
+                                bitmap,
+                                Some(&icon_rect),
+                                opacity,
+                                windows::Win32::Graphics::Direct2D::D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                                None,
+                            );
+                        }
+                        super::icon::IconLookup::Loading => {
+                            self.draw_loading_spinner(rt, icon_x, icon_y, anim_progress, opacity);
+                        }
+                    }
                 }
 
                 // Title — positioned in Flow.Launcher's column 1 area
@@ -402,7 +421,9 @@ impl Renderer {
                         &self.theme.accent,
                         opacity,
                     );
-                } else if let Ok(brush) = self.create_brush_alpha(rt, &self.theme.text_primary, opacity) {
+                } else if let Ok(brush) =
+                    self.create_brush_alpha(rt, &self.theme.text_primary, opacity)
+                {
                     let text_wide = wide_str(&item.title);
                     rt.DrawText(
                         &text_wide[..text_wide.len() - 1],
@@ -424,7 +445,9 @@ impl Renderer {
                     bottom: subtitle_y + 18.0,
                 };
                 if !item.subtitle.is_empty() {
-                    if let Ok(brush) = self.create_brush_alpha(rt, &self.theme.text_secondary, opacity) {
+                    if let Ok(brush) =
+                        self.create_brush_alpha(rt, &self.theme.text_secondary, opacity)
+                    {
                         let text_wide = wide_str(&item.subtitle);
                         rt.DrawText(
                             &text_wide[..text_wide.len() - 1],
@@ -475,7 +498,8 @@ impl Renderer {
 
             // ── Scroll indicator (right side thin bar) ──────────────────────
             if total_items > max_visible {
-                let track_top = layout::SEARCH_BAR_HEIGHT + layout::SEPARATOR_HEIGHT + layout::RESULT_MARGIN_V;
+                let track_top =
+                    layout::SEARCH_BAR_HEIGHT + layout::SEPARATOR_HEIGHT + layout::RESULT_MARGIN_V;
                 let track_height = max_visible as f32 * layout::ITEM_HEIGHT;
                 let track_right = layout::WINDOW_WIDTH - 3.0;
                 let track_left = track_right - 3.0;
@@ -538,8 +562,8 @@ impl Renderer {
         highlight_color: &Color,
         opacity: f32,
     ) {
-        use windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_RANGE;
         use windows::Win32::Graphics::Direct2D::ID2D1Brush;
+        use windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_RANGE;
 
         let wide: Vec<u16> = text.encode_utf16().collect();
         if wide.is_empty() {
@@ -554,7 +578,9 @@ impl Renderer {
                 rect.bottom - rect.top,
             )
         };
-        let Ok(layout) = layout else { return; };
+        let Ok(layout) = layout else {
+            return;
+        };
 
         // Set base color on entire text
         if let Ok(brush) = self.create_brush_alpha(rt, base_color, opacity) {
@@ -599,7 +625,10 @@ impl Renderer {
 
         // Draw the layout
         unsafe {
-            let origin = windows_numerics::Vector2 { X: rect.left, Y: rect.top };
+            let origin = windows_numerics::Vector2 {
+                X: rect.left,
+                Y: rect.top,
+            };
             rt.DrawTextLayout(
                 origin,
                 &layout,
@@ -631,12 +660,98 @@ impl Renderer {
             .map_err(|e| format!("CreateSolidColorBrush failed: {e}"))
     }
 
+    fn draw_search_progress(&self, rt: &ID2D1HwndRenderTarget, phase: f32) {
+        let track_left = layout::PADDING_H;
+        let track_right = layout::WINDOW_WIDTH - layout::PADDING_H;
+        let track_width = track_right - track_left;
+        let segment_width = track_width * 0.28;
+        let travel = track_width + segment_width;
+        let x = track_left - segment_width + travel * phase.fract();
+        let y = layout::SEARCH_BAR_HEIGHT - 2.0;
+
+        if let Ok(brush) = self.create_brush_alpha(rt, &self.theme.accent, 0.22) {
+            unsafe {
+                rt.FillRectangle(
+                    &D2D_RECT_F {
+                        left: track_left,
+                        top: y,
+                        right: track_right,
+                        bottom: y + 2.0,
+                    },
+                    &brush,
+                );
+            }
+        }
+
+        if let Ok(brush) = self.create_brush_alpha(rt, &self.theme.accent, 0.85) {
+            let left = x.max(track_left);
+            let right = (x + segment_width).min(track_right);
+            if right > left {
+                unsafe {
+                    rt.FillRectangle(
+                        &D2D_RECT_F {
+                            left,
+                            top: y,
+                            right,
+                            bottom: y + 2.0,
+                        },
+                        &brush,
+                    );
+                }
+            }
+        }
+    }
+
+    fn draw_loading_spinner(
+        &self,
+        rt: &ID2D1HwndRenderTarget,
+        x: f32,
+        y: f32,
+        phase: f32,
+        opacity: f32,
+    ) {
+        let center_x = x + layout::ICON_SIZE / 2.0;
+        let center_y = y + layout::ICON_SIZE / 2.0;
+        let step = ((phase.fract() * 8.0) as usize) % 8;
+
+        for i in 0..8 {
+            let idx = (i + step) % 8;
+            let alpha = (0.18 + idx as f32 * 0.08).min(0.82) * opacity;
+            let (dx, dy) = match i {
+                0 => (0.0, -10.0),
+                1 => (7.0, -7.0),
+                2 => (10.0, 0.0),
+                3 => (7.0, 7.0),
+                4 => (0.0, 10.0),
+                5 => (-7.0, 7.0),
+                6 => (-10.0, 0.0),
+                _ => (-7.0, -7.0),
+            };
+
+            if let Ok(brush) = self.create_brush_alpha(rt, &self.theme.accent, alpha) {
+                unsafe {
+                    rt.FillRectangle(
+                        &D2D_RECT_F {
+                            left: center_x + dx - 2.0,
+                            top: center_y + dy - 2.0,
+                            right: center_x + dx + 2.0,
+                            bottom: center_y + dy + 2.0,
+                        },
+                        &brush,
+                    );
+                }
+            }
+        }
+    }
+
     /// Render preview info panel below the result list.
     /// Render preview info panel below the result list.
     /// Called separately after the main render when a preview is available.
     #[allow(dead_code)]
     pub fn render_preview(&self, preview: &super::preview::PreviewInfo, y_offset: f32) {
-        let Some(ref rt) = self.render_target else { return; };
+        let Some(ref rt) = self.render_target else {
+            return;
+        };
 
         unsafe {
             rt.BeginDraw();

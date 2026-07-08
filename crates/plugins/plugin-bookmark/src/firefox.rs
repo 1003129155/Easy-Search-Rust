@@ -88,6 +88,7 @@ fn extract_recursive(node: &serde_json::Value, source: &str, out: &mut Vec<Bookm
                     },
                     url: uri.to_string(),
                     source: source.to_string(),
+                    favicon_path: None,
                 });
             }
         }

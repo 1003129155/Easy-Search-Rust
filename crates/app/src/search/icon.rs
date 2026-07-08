@@ -10,7 +10,7 @@
 //! icons can reuse the same GPU resource across different cache keys.
 
 #[cfg(windows)]
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 #[cfg(windows)]
 use crate::shared::icon_assets;
@@ -28,7 +28,10 @@ use windows::Win32::Graphics::Imaging::{
     WICBitmapDitherTypeNone, WICBitmapPaletteTypeMedianCut, WICDecodeMetadataCacheOnLoad,
 };
 #[cfg(windows)]
-use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
+use windows::Win32::System::Com::{
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+    CoUninitialize,
+};
 #[cfg(windows)]
 use windows::Win32::UI::Shell::{
     IShellItem, IShellItemImageFactory, SHCreateItemFromParsingName, SHFILEINFOW, SHGFI_ICON,
@@ -52,6 +55,34 @@ const BUILTIN_FOLDER: &str = "builtin:folder";
 const BUILTIN_MISSING: &str = "builtin:missing";
 
 #[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum IconCacheKey {
+    Ext(String),
+    Path(String),
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone)]
+pub struct IconLoadRequest {
+    pub key: IconCacheKey,
+    pub path: String,
+    pub is_directory: bool,
+}
+
+#[cfg(windows)]
+pub struct IconPixels {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
+#[cfg(windows)]
+pub enum IconLookup<'a> {
+    Ready(&'a ID2D1Bitmap),
+    Loading,
+}
+
+#[cfg(windows)]
 pub struct IconCache {
     wic_factory: Option<IWICImagingFactory>,
     named_cache: HashMap<String, Option<ID2D1Bitmap>>,
@@ -59,6 +90,8 @@ pub struct IconCache {
     path_cache: HashMap<String, Option<ID2D1Bitmap>>,
     path_lru: VecDeque<String>,
     hash_cache: HashMap<u64, ID2D1Bitmap>,
+    pending_loads: HashSet<IconCacheKey>,
+    load_requests: VecDeque<IconLoadRequest>,
 }
 
 #[cfg(windows)]
@@ -80,9 +113,12 @@ impl IconCache {
             path_cache: HashMap::with_capacity(MAX_PATH_CACHE),
             path_lru: VecDeque::with_capacity(MAX_PATH_CACHE),
             hash_cache: HashMap::with_capacity(128),
+            pending_loads: HashSet::new(),
+            load_requests: VecDeque::new(),
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_icon(
         &mut self,
         icon_ref: &str,
@@ -110,6 +146,109 @@ impl IconCache {
         }
     }
 
+    pub fn get_icon_nonblocking(
+        &mut self,
+        icon_ref: &str,
+        is_directory: bool,
+        rt: &ID2D1HwndRenderTarget,
+    ) -> IconLookup<'_> {
+        if icon_assets::is_named_icon(icon_ref) {
+            return IconLookup::Ready(self.get_from_named_cache(icon_ref, rt));
+        }
+
+        let ext = extract_extension(icon_ref);
+        let use_path_cache = !is_directory && is_unique_icon_ext(&ext);
+        let key = if use_path_cache {
+            IconCacheKey::Path(icon_ref.to_string())
+        } else {
+            IconCacheKey::Ext(if is_directory {
+                "::dir".to_string()
+            } else if ext.is_empty() {
+                "::noext".to_string()
+            } else {
+                ext
+            })
+        };
+
+        match &key {
+            IconCacheKey::Path(path) if self.path_cache.contains_key(path) => {
+                self.touch_lru(path);
+                if self
+                    .path_cache
+                    .get(path)
+                    .and_then(|bitmap| bitmap.as_ref())
+                    .is_some()
+                {
+                    return IconLookup::Ready(
+                        self.path_cache
+                            .get(path)
+                            .and_then(|bitmap| bitmap.as_ref())
+                            .unwrap(),
+                    );
+                }
+                return IconLookup::Ready(self.builtin_or_missing(BUILTIN_MISSING, rt));
+            }
+            IconCacheKey::Ext(ext_key) if self.ext_cache.contains_key(ext_key) => {
+                if self
+                    .ext_cache
+                    .get(ext_key)
+                    .and_then(|bitmap| bitmap.as_ref())
+                    .is_some()
+                {
+                    return IconLookup::Ready(
+                        self.ext_cache
+                            .get(ext_key)
+                            .and_then(|bitmap| bitmap.as_ref())
+                            .unwrap(),
+                    );
+                }
+                return IconLookup::Ready(self.builtin_or_missing(BUILTIN_MISSING, rt));
+            }
+            _ => {}
+        }
+
+        if self.pending_loads.insert(key.clone()) {
+            self.load_requests.push_back(IconLoadRequest {
+                key,
+                path: icon_ref.to_string(),
+                is_directory,
+            });
+        }
+
+        IconLookup::Loading
+    }
+
+    pub fn take_load_requests(&mut self) -> Vec<IconLoadRequest> {
+        self.load_requests.drain(..).collect()
+    }
+
+    pub fn has_pending_loads(&self) -> bool {
+        !self.pending_loads.is_empty()
+    }
+
+    pub fn finish_load(
+        &mut self,
+        request: IconLoadRequest,
+        pixels: Option<IconPixels>,
+        rt: &ID2D1HwndRenderTarget,
+    ) {
+        self.pending_loads.remove(&request.key);
+        let bitmap = pixels.and_then(|pixels| self.bitmap_from_pixels(&pixels, rt));
+
+        match request.key {
+            IconCacheKey::Path(path) => {
+                if self.path_cache.len() >= MAX_PATH_CACHE && !self.path_cache.contains_key(&path) {
+                    self.evict_oldest();
+                }
+                self.path_cache.insert(path.clone(), bitmap);
+                self.path_lru.push_back(path);
+            }
+            IconCacheKey::Ext(key) => {
+                self.ext_cache.insert(key, bitmap);
+            }
+        }
+    }
+
     #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.named_cache.clear();
@@ -117,6 +256,8 @@ impl IconCache {
         self.path_cache.clear();
         self.path_lru.clear();
         self.hash_cache.clear();
+        self.pending_loads.clear();
+        self.load_requests.clear();
     }
 
     #[allow(dead_code)]
@@ -124,11 +265,7 @@ impl IconCache {
         self.named_cache.len() + self.ext_cache.len() + self.path_cache.len()
     }
 
-    fn get_from_named_cache(
-        &mut self,
-        key: &str,
-        rt: &ID2D1HwndRenderTarget,
-    ) -> &ID2D1Bitmap {
+    fn get_from_named_cache(&mut self, key: &str, rt: &ID2D1HwndRenderTarget) -> &ID2D1Bitmap {
         if !self.named_cache.contains_key(key) {
             let bitmap = self.load_named_icon_fallible(key, rt);
             self.named_cache.insert(key.to_string(), bitmap);
@@ -150,6 +287,7 @@ impl IconCache {
         self.builtin_or_missing(BUILTIN_MISSING, rt)
     }
 
+    #[allow(dead_code)]
     fn get_from_ext_cache(
         &mut self,
         key: &str,
@@ -178,11 +316,8 @@ impl IconCache {
         self.builtin_or_missing(BUILTIN_MISSING, rt)
     }
 
-    fn get_from_path_cache(
-        &mut self,
-        path: &str,
-        rt: &ID2D1HwndRenderTarget,
-    ) -> &ID2D1Bitmap {
+    #[allow(dead_code)]
+    fn get_from_path_cache(&mut self, path: &str, rt: &ID2D1HwndRenderTarget) -> &ID2D1Bitmap {
         if self.path_cache.contains_key(path) {
             self.touch_lru(path);
         } else {
@@ -233,9 +368,7 @@ impl IconCache {
 
         unsafe {
             let stream = wic.CreateStream().ok()?;
-            stream
-                .InitializeFromMemory(bytes)
-                .ok()?;
+            stream.InitializeFromMemory(bytes).ok()?;
             let decoder = wic
                 .CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnLoad)
                 .ok()?;
@@ -245,6 +378,7 @@ impl IconCache {
         }
     }
 
+    #[allow(dead_code)]
     fn load_path_icon_fallible(
         &mut self,
         path: &str,
@@ -264,6 +398,7 @@ impl IconCache {
         None
     }
 
+    #[allow(dead_code)]
     fn try_shell_image_factory(
         &mut self,
         path: &str,
@@ -304,6 +439,7 @@ impl IconCache {
         }
     }
 
+    #[allow(dead_code)]
     fn try_sh_get_file_info(
         &mut self,
         path: &str,
@@ -332,11 +468,7 @@ impl IconCache {
         }
     }
 
-    fn builtin_or_missing(
-        &mut self,
-        key: &str,
-        rt: &ID2D1HwndRenderTarget,
-    ) -> &ID2D1Bitmap {
+    fn builtin_or_missing(&mut self, key: &str, rt: &ID2D1HwndRenderTarget) -> &ID2D1Bitmap {
         if !self.named_cache.contains_key(key) {
             let bitmap = self
                 .load_named_icon_fallible(key, rt)
@@ -359,19 +491,14 @@ impl IconCache {
 
         self.named_cache.remove(BUILTIN_MISSING);
         let bitmap = self.create_builtin_bitmap(BUILTIN_MISSING, rt);
-        self.named_cache
-            .insert(BUILTIN_MISSING.to_string(), bitmap);
+        self.named_cache.insert(BUILTIN_MISSING.to_string(), bitmap);
         self.named_cache
             .get(BUILTIN_MISSING)
             .and_then(|bitmap| bitmap.as_ref())
             .expect("builtin missing icon should always exist")
     }
 
-    fn create_builtin_bitmap(
-        &self,
-        key: &str,
-        rt: &ID2D1HwndRenderTarget,
-    ) -> Option<ID2D1Bitmap> {
+    fn create_builtin_bitmap(&self, key: &str, rt: &ID2D1HwndRenderTarget) -> Option<ID2D1Bitmap> {
         let wic = self.wic_factory.as_ref()?;
         let (r, g, b): (u8, u8, u8) = match key {
             BUILTIN_PROGRAM => (0x00, 0x78, 0xD4),
@@ -429,6 +556,38 @@ impl IconCache {
         }
     }
 
+    fn bitmap_from_pixels(
+        &mut self,
+        pixels: &IconPixels,
+        rt: &ID2D1HwndRenderTarget,
+    ) -> Option<ID2D1Bitmap> {
+        let wic = self.wic_factory.as_ref()?;
+        let stride = pixels.width.saturating_mul(4);
+        if stride == 0 || pixels.height == 0 || pixels.pixels.is_empty() {
+            return None;
+        }
+
+        let hash = hash_icon_pixels(pixels.width, pixels.height, &pixels.pixels);
+        if let Some(bitmap) = self.hash_cache.get(&hash) {
+            return Some(bitmap.clone());
+        }
+
+        unsafe {
+            let wic_bitmap = wic
+                .CreateBitmapFromMemory(
+                    pixels.width,
+                    pixels.height,
+                    &GUID_WICPixelFormat32bppPBGRA,
+                    stride,
+                    &pixels.pixels,
+                )
+                .ok()?;
+            let bitmap = rt.CreateBitmapFromWicBitmap(&wic_bitmap, None).ok()?;
+            self.hash_cache.insert(hash, bitmap.clone());
+            Some(bitmap)
+        }
+    }
+
     fn bitmap_from_wic_source(
         &mut self,
         source: &IWICBitmapSource,
@@ -472,6 +631,7 @@ impl IconCache {
         }
     }
 
+    #[allow(dead_code)]
     fn hbitmap_to_d2d_bitmap(
         &mut self,
         hbitmap: HBITMAP,
@@ -491,6 +651,7 @@ impl IconCache {
         }
     }
 
+    #[allow(dead_code)]
     fn hicon_to_d2d_bitmap(
         &mut self,
         hicon: windows::Win32::UI::WindowsAndMessaging::HICON,
@@ -525,7 +686,10 @@ fn hash_icon_pixels(width: u32, height: u32, pixels: &[u8]) -> u64 {
 
 #[cfg(windows)]
 fn is_unique_icon_ext(ext: &str) -> bool {
-    matches!(ext.to_ascii_lowercase().as_str(), ".exe" | ".lnk" | ".ico" | ".url")
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        ".exe" | ".lnk" | ".ico" | ".url"
+    )
 }
 
 #[cfg(windows)]
@@ -550,5 +714,155 @@ impl Default for IconCache {
 impl Drop for IconCache {
     fn drop(&mut self) {
         self.clear();
+    }
+}
+
+#[cfg(windows)]
+pub fn load_icon_pixels(request: &IconLoadRequest) -> Option<IconPixels> {
+    let com_initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
+    let result = load_icon_pixels_inner(&request.path, request.is_directory);
+    if com_initialized {
+        unsafe { CoUninitialize() };
+    }
+    result
+}
+
+#[cfg(windows)]
+fn load_icon_pixels_inner(path: &str, is_directory: bool) -> Option<IconPixels> {
+    let wic = unsafe {
+        CoCreateInstance::<_, IWICImagingFactory>(
+            &CLSID_WICImagingFactory,
+            None,
+            CLSCTX_INPROC_SERVER,
+        )
+    }
+    .ok()?;
+
+    try_shell_image_factory_pixels(path, is_directory, &wic)
+        .or_else(|| try_sh_get_file_info_pixels(path, &wic))
+}
+
+#[cfg(windows)]
+fn try_shell_image_factory_pixels(
+    path: &str,
+    is_directory: bool,
+    wic: &IWICImagingFactory,
+) -> Option<IconPixels> {
+    unsafe {
+        let path_wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let shell_item: IShellItem =
+            SHCreateItemFromParsingName(PCWSTR(path_wide.as_ptr()), None).ok()?;
+        let image_factory: IShellItemImageFactory = shell_item.cast().ok()?;
+
+        let size = SIZE {
+            cx: ICON_REQUEST_SIZE,
+            cy: ICON_REQUEST_SIZE,
+        };
+
+        const SIIGBF_ICONONLY_VAL: i32 = 0x00000004;
+        let flags = if is_directory {
+            SIIGBF(SIIGBF_ICONONLY_VAL)
+        } else {
+            SIIGBF(0)
+        };
+
+        let hbitmap = match image_factory.GetImage(size, flags) {
+            Ok(bitmap) => bitmap,
+            Err(_) if !is_directory => image_factory
+                .GetImage(size, SIIGBF(SIIGBF_ICONONLY_VAL))
+                .ok()?,
+            Err(_) => return None,
+        };
+
+        let pixels = hbitmap_to_pixels(hbitmap, wic);
+        let _ = DeleteObject(hbitmap.into());
+        pixels
+    }
+}
+
+#[cfg(windows)]
+fn try_sh_get_file_info_pixels(path: &str, wic: &IWICImagingFactory) -> Option<IconPixels> {
+    unsafe {
+        let path_wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut shfi = SHFILEINFOW::default();
+
+        let result = SHGetFileInfoW(
+            PCWSTR(path_wide.as_ptr()),
+            windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
+            Some(&mut shfi),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES,
+        );
+
+        if result == 0 || shfi.hIcon.is_invalid() {
+            return None;
+        }
+
+        let pixels = hicon_to_pixels(shfi.hIcon, wic);
+        let _ = windows::Win32::UI::WindowsAndMessaging::DestroyIcon(shfi.hIcon);
+        pixels
+    }
+}
+
+#[cfg(windows)]
+fn hbitmap_to_pixels(hbitmap: HBITMAP, wic: &IWICImagingFactory) -> Option<IconPixels> {
+    unsafe {
+        let wic_bitmap = wic
+            .CreateBitmapFromHBITMAP(
+                hbitmap,
+                HPALETTE::default(),
+                WICBitmapAlphaChannelOption::default(),
+            )
+            .ok()?;
+        let source: IWICBitmapSource = wic_bitmap.cast().ok()?;
+        wic_source_to_pixels(&source, wic)
+    }
+}
+
+#[cfg(windows)]
+fn hicon_to_pixels(
+    hicon: windows::Win32::UI::WindowsAndMessaging::HICON,
+    wic: &IWICImagingFactory,
+) -> Option<IconPixels> {
+    unsafe {
+        let wic_bitmap = wic.CreateBitmapFromHICON(hicon).ok()?;
+        let source: IWICBitmapSource = wic_bitmap.cast().ok()?;
+        wic_source_to_pixels(&source, wic)
+    }
+}
+
+#[cfg(windows)]
+fn wic_source_to_pixels(source: &IWICBitmapSource, wic: &IWICImagingFactory) -> Option<IconPixels> {
+    unsafe {
+        let converter: IWICFormatConverter = wic.CreateFormatConverter().ok()?;
+        converter
+            .Initialize(
+                source,
+                &GUID_WICPixelFormat32bppPBGRA,
+                WICBitmapDitherTypeNone,
+                None,
+                0.0,
+                WICBitmapPaletteTypeMedianCut,
+            )
+            .ok()?;
+
+        let mut width = 0u32;
+        let mut height = 0u32;
+        converter.GetSize(&mut width, &mut height).ok()?;
+        if width == 0 || height == 0 {
+            return None;
+        }
+
+        let stride = width.saturating_mul(4);
+        let mut pixels = vec![0u8; (stride as usize).saturating_mul(height as usize)];
+        converter
+            .CopyPixels(std::ptr::null(), stride, pixels.as_mut_slice())
+            .ok()?;
+
+        Some(IconPixels {
+            width,
+            height,
+            pixels,
+        })
     }
 }

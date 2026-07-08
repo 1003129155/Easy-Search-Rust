@@ -1,41 +1,34 @@
 // Copyright (c) 2025-2026 LIJIALU. MIT License.
 
 //! Browser bookmark search plugin.
-//!
-//! Features:
-//! - Chrome, Edge, Brave, Opera, Vivaldi (Chromium-based)
-//! - Firefox (from places.sqlite backup JSON)
-//! - Multi-profile support
-//! - Poll-based bookmark refresh
-//! - Fuzzy matching on name and URL
 
 mod chromium;
 mod firefox;
 
 use easysearch_core::{Action, Plugin, PluginResult, SettingControl, SettingItem};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Refresh interval for bookmark polling (5 minutes).
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// A single bookmark entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bookmark {
     pub name: String,
     pub url: String,
-    /// Which browser/profile this came from.
     pub source: String,
+    #[serde(default)]
+    pub favicon_path: Option<String>,
 }
 
-/// Settings for the Bookmark plugin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BookmarkSettings {
     pub enable_chrome: bool,
     pub enable_edge: bool,
     pub enable_brave: bool,
     pub enable_firefox: bool,
+    pub enable_favicons: bool,
     pub max_results: u32,
 }
 
@@ -46,12 +39,12 @@ impl Default for BookmarkSettings {
             enable_edge: true,
             enable_brave: true,
             enable_firefox: true,
+            enable_favicons: true,
             max_results: 8,
         }
     }
 }
 
-/// Browser bookmark plugin.
 pub struct BookmarkPlugin {
     bookmarks: Arc<Mutex<Vec<Bookmark>>>,
     settings: BookmarkSettings,
@@ -70,7 +63,6 @@ impl BookmarkPlugin {
         }
     }
 
-    /// Reload bookmarks if the refresh interval has elapsed.
     fn maybe_refresh(&self) {
         let should_refresh = self
             .last_refresh
@@ -156,8 +148,8 @@ impl Plugin for BookmarkPlugin {
 
     fn display_name(&self, locale: &str) -> String {
         match locale_prefix(locale) {
-            "zh" => "书签",
-            "ja" => "ブックマーク",
+            "zh" => "涔︾",
+            "ja" => "銉栥儍銈優銉笺偗",
             _ => "Bookmark",
         }
         .to_string()
@@ -169,8 +161,11 @@ impl Plugin for BookmarkPlugin {
 
     fn description_for_locale(&self, locale: &str) -> String {
         match locale_prefix(locale) {
-            "zh" => "搜索 Chrome、Edge、Brave 和 Firefox 的浏览器书签".to_string(),
-            "ja" => "Chrome、Edge、Brave、Firefox のブラウザーブックマークを検索します".to_string(),
+            "zh" => "鎼滅储 Chrome銆丒dge銆丅rave 鍜?Firefox 鐨勬祻瑙堝櫒涔︾".to_string(),
+            "ja" => {
+                "Chrome銆丒dge銆丅rave銆丗irefox 銇儢銉┿偊銈躲兗銉栥儍銈優銉笺偗銈掓绱仐銇俱仚"
+                    .to_string()
+            }
             _ => self.description().to_string(),
         }
     }
@@ -180,97 +175,20 @@ impl Plugin for BookmarkPlugin {
     }
 
     fn settings_schema(&self) -> Option<Vec<SettingItem>> {
-        self.settings_schema_for_locale("en")
+        Some(settings_items())
     }
 
-    fn settings_schema_for_locale(&self, locale: &str) -> Option<Vec<SettingItem>> {
-        let texts = match locale_prefix(locale) {
-            "zh" => [
-                ("启用 Chrome", "加载 Google Chrome 书签"),
-                ("启用 Edge", "加载 Microsoft Edge 书签"),
-                ("启用 Brave", "加载 Brave 浏览器书签"),
-                ("启用 Firefox", "加载 Firefox 书签"),
-                ("最大结果数", "搜索结果最多显示多少条书签"),
-            ],
-            "ja" => [
-                ("Chrome を有効化", "Google Chrome のブックマークを読み込みます"),
-                ("Edge を有効化", "Microsoft Edge のブックマークを読み込みます"),
-                ("Brave を有効化", "Brave ブラウザーのブックマークを読み込みます"),
-                ("Firefox を有効化", "Firefox のブックマークを読み込みます"),
-                ("最大結果数", "検索結果に表示するブックマーク数の上限です"),
-            ],
-            _ => [
-                ("Enable Chrome", "Load Google Chrome bookmarks"),
-                ("Enable Edge", "Load Microsoft Edge bookmarks"),
-                ("Enable Brave", "Load Brave browser bookmarks"),
-                ("Enable Firefox", "Load Firefox bookmarks"),
-                (
-                    "Maximum results",
-                    "How many bookmarks to show at most in search results",
-                ),
-            ],
-        };
-
-        Some(vec![
-            SettingItem {
-                key: "enable_chrome".to_string(),
-                label: texts[0].0.to_string(),
-                description: texts[0].1.to_string(),
-                control: SettingControl::Toggle { default: true },
-            },
-            SettingItem {
-                key: "enable_edge".to_string(),
-                label: texts[1].0.to_string(),
-                description: texts[1].1.to_string(),
-                control: SettingControl::Toggle { default: true },
-            },
-            SettingItem {
-                key: "enable_brave".to_string(),
-                label: texts[2].0.to_string(),
-                description: texts[2].1.to_string(),
-                control: SettingControl::Toggle { default: true },
-            },
-            SettingItem {
-                key: "enable_firefox".to_string(),
-                label: texts[3].0.to_string(),
-                description: texts[3].1.to_string(),
-                control: SettingControl::Toggle { default: true },
-            },
-            SettingItem {
-                key: "max_results".to_string(),
-                label: texts[4].0.to_string(),
-                description: texts[4].1.to_string(),
-                control: SettingControl::Number {
-                    min: 1,
-                    max: 20,
-                    default: 8,
-                },
-            },
-        ])
+    fn settings_schema_for_locale(&self, _locale: &str) -> Option<Vec<SettingItem>> {
+        Some(settings_items())
     }
 
     fn on_setting_changed(&mut self, key: &str, value: &str) {
         match key {
-            "enable_chrome" => {
-                if let Ok(v) = serde_json::from_str(value) {
-                    self.settings.enable_chrome = v;
-                }
-            }
-            "enable_edge" => {
-                if let Ok(v) = serde_json::from_str(value) {
-                    self.settings.enable_edge = v;
-                }
-            }
-            "enable_brave" => {
-                if let Ok(v) = serde_json::from_str(value) {
-                    self.settings.enable_brave = v;
-                }
-            }
-            "enable_firefox" => {
-                if let Ok(v) = serde_json::from_str(value) {
-                    self.settings.enable_firefox = v;
-                }
-            }
+            "enable_chrome" => assign_bool(&mut self.settings.enable_chrome, value),
+            "enable_edge" => assign_bool(&mut self.settings.enable_edge, value),
+            "enable_brave" => assign_bool(&mut self.settings.enable_brave, value),
+            "enable_firefox" => assign_bool(&mut self.settings.enable_firefox, value),
+            "enable_favicons" => assign_bool(&mut self.settings.enable_favicons, value),
             "max_results" => {
                 if let Ok(v) = serde_json::from_str(value) {
                     self.settings.max_results = v;
@@ -287,22 +205,11 @@ impl Plugin for BookmarkPlugin {
 
     fn setting_values(&self) -> Vec<(String, String)> {
         vec![
-            (
-                "enable_chrome".to_string(),
-                serde_json::to_string(&self.settings.enable_chrome).unwrap_or_default(),
-            ),
-            (
-                "enable_edge".to_string(),
-                serde_json::to_string(&self.settings.enable_edge).unwrap_or_default(),
-            ),
-            (
-                "enable_brave".to_string(),
-                serde_json::to_string(&self.settings.enable_brave).unwrap_or_default(),
-            ),
-            (
-                "enable_firefox".to_string(),
-                serde_json::to_string(&self.settings.enable_firefox).unwrap_or_default(),
-            ),
+            json_setting("enable_chrome", self.settings.enable_chrome),
+            json_setting("enable_edge", self.settings.enable_edge),
+            json_setting("enable_brave", self.settings.enable_brave),
+            json_setting("enable_firefox", self.settings.enable_firefox),
+            json_setting("enable_favicons", self.settings.enable_favicons),
             (
                 "max_results".to_string(),
                 serde_json::to_string(&self.settings.max_results).unwrap_or_default(),
@@ -315,7 +222,10 @@ fn bookmark_to_result(b: &Bookmark, score: u32) -> PluginResult {
     PluginResult {
         title: b.name.clone(),
         subtitle: format!("{} - {}", b.source, b.url),
-        icon: String::from("bookmark"),
+        icon: b
+            .favicon_path
+            .clone()
+            .unwrap_or_else(|| String::from("bookmark")),
         action: Action::Open(b.url.clone()),
         score,
         highlight: Vec::new(),
@@ -324,33 +234,56 @@ fn bookmark_to_result(b: &Bookmark, score: u32) -> PluginResult {
     }
 }
 
-/// Load all bookmarks from enabled browsers.
 fn load_all_bookmarks(settings: &BookmarkSettings) -> Vec<Bookmark> {
     let mut all = Vec::new();
+    let favicon_cache_dir = favicon_cache_dir();
 
     if settings.enable_chrome {
-        all.extend(chromium::load_chromium_bookmarks("Google/Chrome", "Chrome"));
+        all.extend(chromium::load_chromium_bookmarks(
+            "Google/Chrome",
+            "Chrome",
+            settings.enable_favicons,
+            &favicon_cache_dir,
+        ));
         all.extend(chromium::load_chromium_bookmarks(
             "Google/Chrome SxS",
             "Chrome Canary",
+            settings.enable_favicons,
+            &favicon_cache_dir,
         ));
-        all.extend(chromium::load_chromium_bookmarks("Chromium", "Chromium"));
+        all.extend(chromium::load_chromium_bookmarks(
+            "Chromium",
+            "Chromium",
+            settings.enable_favicons,
+            &favicon_cache_dir,
+        ));
     }
     if settings.enable_edge {
-        all.extend(chromium::load_chromium_bookmarks("Microsoft/Edge", "Edge"));
+        all.extend(chromium::load_chromium_bookmarks(
+            "Microsoft/Edge",
+            "Edge",
+            settings.enable_favicons,
+            &favicon_cache_dir,
+        ));
         all.extend(chromium::load_chromium_bookmarks(
             "Microsoft/Edge Dev",
             "Edge Dev",
+            settings.enable_favicons,
+            &favicon_cache_dir,
         ));
         all.extend(chromium::load_chromium_bookmarks(
             "Microsoft/Edge SxS",
             "Edge Canary",
+            settings.enable_favicons,
+            &favicon_cache_dir,
         ));
     }
     if settings.enable_brave {
         all.extend(chromium::load_chromium_bookmarks(
             "BraveSoftware/Brave-Browser",
             "Brave",
+            settings.enable_favicons,
+            &favicon_cache_dir,
         ));
     }
     if settings.enable_firefox {
@@ -358,6 +291,77 @@ fn load_all_bookmarks(settings: &BookmarkSettings) -> Vec<Bookmark> {
     }
 
     all
+}
+
+fn toggle_setting(key: &str, label: &str, description: &str, default: bool) -> SettingItem {
+    SettingItem {
+        key: key.to_string(),
+        label: label.to_string(),
+        description: description.to_string(),
+        control: SettingControl::Toggle { default },
+    }
+}
+
+fn assign_bool(slot: &mut bool, value: &str) {
+    if let Ok(v) = serde_json::from_str(value) {
+        *slot = v;
+    }
+}
+
+fn json_setting(key: &str, value: bool) -> (String, String) {
+    (
+        key.to_string(),
+        serde_json::to_string(&value).unwrap_or_default(),
+    )
+}
+
+fn favicon_cache_dir() -> PathBuf {
+    easysearch_core::paths::plugin_cache_dir("bookmark").join("favicons")
+}
+
+fn settings_items() -> Vec<SettingItem> {
+    vec![
+        toggle_setting(
+            "enable_chrome",
+            "Enable Chrome",
+            "Load Google Chrome bookmarks",
+            true,
+        ),
+        toggle_setting(
+            "enable_edge",
+            "Enable Edge",
+            "Load Microsoft Edge bookmarks",
+            true,
+        ),
+        toggle_setting(
+            "enable_brave",
+            "Enable Brave",
+            "Load Brave browser bookmarks",
+            true,
+        ),
+        toggle_setting(
+            "enable_firefox",
+            "Enable Firefox",
+            "Load Firefox bookmarks",
+            true,
+        ),
+        toggle_setting(
+            "enable_favicons",
+            "Enable favicons",
+            "Try loading per-site icons from the browser favicon database",
+            true,
+        ),
+        SettingItem {
+            key: "max_results".to_string(),
+            label: "Maximum results".to_string(),
+            description: "How many bookmarks to show at most in search results".to_string(),
+            control: SettingControl::Number {
+                min: 1,
+                max: 20,
+                default: 8,
+            },
+        },
+    ]
 }
 
 fn locale_prefix(locale: &str) -> &str {

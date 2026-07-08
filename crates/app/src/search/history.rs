@@ -157,3 +157,146 @@ fn history_file_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("EasySearch").join("history.json")
 }
+
+// ─── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_increments_count() {
+        let mut h = History::default();
+        assert_eq!(h.count("open:a"), 0);
+        h.record("open:a");
+        h.record("open:a");
+        assert_eq!(h.count("open:a"), 2);
+        assert_eq!(h.count("open:b"), 0);
+    }
+
+    #[test]
+    fn boost_score_buckets() {
+        let mut h = History::default();
+        assert_eq!(h.boost_score("k"), 0);
+
+        h.record("k"); // 1
+        assert_eq!(h.boost_score("k"), 20);
+
+        h.record("k"); // 2
+        assert_eq!(h.boost_score("k"), 20);
+
+        h.record("k"); // 3
+        assert_eq!(h.boost_score("k"), 40);
+
+        for _ in 0..7 {
+            h.record("k"); // 10
+        }
+        assert_eq!(h.boost_score("k"), 60);
+
+        for _ in 0..20 {
+            h.record("k"); // 30
+        }
+        assert_eq!(h.boost_score("k"), 80);
+
+        for _ in 0..70 {
+            h.record("k"); // 100
+        }
+        assert_eq!(h.boost_score("k"), 100);
+    }
+
+    #[test]
+    fn record_full_dedups_by_key_and_keeps_newest() {
+        let mut h = History::default();
+        h.record_full("open:a", "A", "sub", "icon", false);
+        h.record_full("open:b", "B", "sub", "icon", false);
+        // Re-record "a" — should dedup, move it to newest, and bump count.
+        h.record_full("open:a", "A2", "sub2", "icon2", true);
+
+        let recent = h.top_recent(10);
+        // Newest first: a (updated), then b.
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].action_key, "open:a");
+        assert_eq!(recent[0].title, "A2");
+        assert_eq!(recent[0].is_directory, true);
+        assert_eq!(recent[1].action_key, "open:b");
+        // Count reflects both records of "a".
+        assert_eq!(h.count("open:a"), 2);
+    }
+
+    #[test]
+    fn top_recent_returns_newest_first_and_limits() {
+        let mut h = History::default();
+        for i in 0..5 {
+            h.record_full(&format!("open:{i}"), &format!("T{i}"), "", "", false);
+        }
+        let recent = h.top_recent(3);
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent[0].action_key, "open:4");
+        assert_eq!(recent[1].action_key, "open:3");
+        assert_eq!(recent[2].action_key, "open:2");
+    }
+
+    #[test]
+    fn recent_capacity_is_bounded() {
+        let mut h = History::default();
+        for i in 0..(MAX_RECENT + 10) {
+            h.record_full(&format!("open:{i}"), "T", "", "", false);
+        }
+        // Never exceeds MAX_RECENT stored entries.
+        assert_eq!(h.top_recent(usize::MAX).len(), MAX_RECENT);
+        // The newest entry survives; the oldest are dropped.
+        let recent = h.top_recent(1);
+        assert_eq!(recent[0].action_key, format!("open:{}", MAX_RECENT + 9));
+    }
+
+    #[test]
+    fn pin_unpin_and_query_case_insensitive() {
+        let mut h = History::default();
+        assert!(!h.is_pinned("Foo", "open:a"));
+
+        h.pin("Foo", "open:a");
+        // Query matching is case-insensitive.
+        assert!(h.is_pinned("foo", "open:a"));
+        assert!(h.is_pinned("FOO", "open:a"));
+        assert_eq!(h.pinned_position("foo", "open:a"), Some(0));
+
+        // Pinning again is idempotent (no duplicates).
+        h.pin("foo", "open:a");
+        assert_eq!(h.pinned_position("foo", "open:a"), Some(0));
+
+        h.pin("foo", "open:b");
+        assert_eq!(h.pinned_position("foo", "open:b"), Some(1));
+
+        h.unpin("FOO", "open:a");
+        assert!(!h.is_pinned("foo", "open:a"));
+        // Remaining item shifts position.
+        assert_eq!(h.pinned_position("foo", "open:b"), Some(0));
+    }
+
+    #[test]
+    fn serde_roundtrip_preserves_state() {
+        let mut h = History::default();
+        h.record_full("open:a", "A", "subA", "iconA", true);
+        h.record("open:a");
+        h.pin("query", "open:a");
+
+        let json = serde_json::to_string(&h).unwrap();
+        let restored: History = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.count("open:a"), 2);
+        assert!(restored.is_pinned("query", "open:a"));
+        let recent = restored.top_recent(1);
+        assert_eq!(recent[0].title, "A");
+        assert_eq!(recent[0].is_directory, true);
+    }
+
+    #[test]
+    fn deserialize_partial_json_fills_defaults() {
+        // Old format with only `entries` — pinned/recent should default.
+        let json = r#"{"entries":{"open:x":5}}"#;
+        let h: History = serde_json::from_str(json).unwrap();
+        assert_eq!(h.count("open:x"), 5);
+        assert!(h.top_recent(10).is_empty());
+        assert!(!h.is_pinned("q", "open:x"));
+    }
+}
