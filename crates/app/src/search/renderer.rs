@@ -189,6 +189,8 @@ impl Renderer {
         anim_progress: f32,
         search_active: bool,
         preview: Option<(&super::preview::PreviewInfo, f32)>,
+        input_focused: bool,
+        cursor_moved_at: u128,
     ) {
         let Some(ref rt) = self.render_target else {
             return;
@@ -277,7 +279,9 @@ impl Renderer {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis();
-                    let cursor_visible = (tick / 530) % 2 == 0;
+                    // Keep cursor visible for 530ms after last movement, then blink
+                    let recently_moved = tick.saturating_sub(cursor_moved_at) < 530;
+                    let cursor_visible = recently_moved || (tick / 530) % 2 == 0;
 
                     if cursor_visible {
                         let cursor_x = self.measure_text_width(input_text, cursor_pos);
@@ -315,8 +319,9 @@ impl Renderer {
             // Calculate which items are visible based on selected_index
             let total_items = items.len();
             let max_visible = layout::MAX_VISIBLE_ITEMS;
-            let scroll_offset = if selected_index >= max_visible {
-                selected_index - max_visible + 1
+            let clamped_selected = if input_focused { 0 } else { selected_index.min(total_items.saturating_sub(1)) };
+            let scroll_offset = if clamped_selected >= max_visible {
+                clamped_selected - max_visible + 1
             } else {
                 0
             };
@@ -333,7 +338,7 @@ impl Renderer {
                 let opacity = 1.0_f32; // Animation disabled
 
                 let y = results_y_start + vi as f32 * layout::ITEM_HEIGHT;
-                let is_selected = item_index == selected_index;
+                let is_selected = !input_focused && item_index == selected_index;
 
                 // Selected item background with rounded corners
                 // Flow.Launcher: ItemMargin="10 0 10 0", ItemRadius=5
@@ -508,7 +513,7 @@ impl Renderer {
                 let thumb_ratio = max_visible as f32 / total_items as f32;
                 let thumb_height = (track_height * thumb_ratio).max(20.0);
                 let scroll_ratio = if total_items > 1 {
-                    selected_index as f32 / (total_items - 1) as f32
+                    clamped_selected as f32 / (total_items - 1) as f32
                 } else {
                     0.0
                 };

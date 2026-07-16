@@ -31,6 +31,11 @@ fn locale_prefix() -> String {
         .to_string()
 }
 
+/// Get the current locale prefix (public version for use by plugins).
+pub fn get_locale_prefix() -> String {
+    locale_prefix()
+}
+
 // ─── File / Folder context actions ──────────────────────────────────────────
 
 /// "Open file" or "Open folder"

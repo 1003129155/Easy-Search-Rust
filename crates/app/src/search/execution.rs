@@ -32,16 +32,25 @@ pub(super) fn execute_selected_safe() {
         let idx = app.selected_index.min(app.items.len() - 1);
         let item = app.items[idx].clone();
 
-        // Record usage with full metadata for the home-screen recent panel.
+        // Only record full history (for home-screen recent panel) when executing
+        // from the normal results view — NOT from context menu actions.
+        // This matches Flow.Launcher's behavior: "Add item to history only if
+        // it is from results but not context menu or history".
         let history_key = action_to_history_key_static(&item.action);
-        let icon = item.icon_path.as_deref().unwrap_or(&item.icon);
-        app.history.record_full(
-            &history_key,
-            &item.title,
-            &item.subtitle,
-            icon,
-            item.is_directory,
-        );
+        if app.view_mode == ViewMode::Results {
+            let icon = item.icon_path.as_deref().unwrap_or(&item.icon);
+            app.history.record_full(
+                &history_key,
+                &item.title,
+                &item.subtitle,
+                icon,
+                item.is_directory,
+            );
+        } else {
+            // Still record usage count for frequency-based ranking,
+            // but don't add to the recent items list.
+            app.history.record(&history_key);
+        }
         app.history.save();
 
         Some(item)

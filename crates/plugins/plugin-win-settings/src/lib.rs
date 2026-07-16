@@ -4,11 +4,16 @@
 //!
 //! Loads settings from embedded JSON (ported from Flow.Launcher data).
 
-use easysearch_core::{Action, Plugin, PluginResult, SettingControl, SettingItem};
+use easysearch_core::{Action, Plugin, PluginResult, SettingControl, SettingItem, context_labels};
 use serde::Deserialize;
+use std::collections::HashMap;
 
 /// Embedded JSON data.
 const SETTINGS_JSON: &str = include_str!("data.json");
+
+/// Embedded translation data.
+const TRANSLATIONS_ZH: &str = include_str!("translations_zh.json");
+const TRANSLATIONS_JA: &str = include_str!("translations_ja.json");
 
 /// A single Windows Setting entry from the JSON data.
 #[derive(Debug, Clone, Deserialize)]
@@ -42,15 +47,24 @@ pub struct WinSettingsPlugin {
     entries: Vec<SettingsEntry>,
     /// Maximum number of results to show.
     max_results: usize,
+    /// Translation maps: key → translated display name.
+    translations_zh: HashMap<String, String>,
+    translations_ja: HashMap<String, String>,
 }
 
 impl WinSettingsPlugin {
     #[must_use]
     pub fn new() -> Self {
         let entries = load_entries();
+        let translations_zh: HashMap<String, String> =
+            serde_json::from_str(TRANSLATIONS_ZH).unwrap_or_default();
+        let translations_ja: HashMap<String, String> =
+            serde_json::from_str(TRANSLATIONS_JA).unwrap_or_default();
         Self {
             entries,
             max_results: 10,
+            translations_zh,
+            translations_ja,
         }
     }
 
@@ -64,6 +78,46 @@ impl WinSettingsPlugin {
             result.push(ch);
         }
         result
+    }
+
+    /// Get the translated name for an entry based on current locale.
+    fn translated_name(&self, entry: &SettingsEntry) -> String {
+        let locale = context_labels::get_locale_prefix();
+        match locale.as_str() {
+            "zh" => self
+                .translations_zh
+                .get(&entry.name)
+                .cloned()
+                .unwrap_or_else(|| Self::display_name(&entry.name)),
+            "ja" => self
+                .translations_ja
+                .get(&entry.name)
+                .cloned()
+                .unwrap_or_else(|| Self::display_name(&entry.name)),
+            _ => Self::display_name(&entry.name),
+        }
+    }
+
+    /// Get the translated area for an entry based on current locale.
+    fn translated_area(&self, entry: &SettingsEntry) -> String {
+        if entry.area.is_empty() {
+            return String::new();
+        }
+        let locale = context_labels::get_locale_prefix();
+        let area_key = format!("Area{}", entry.area);
+        match locale.as_str() {
+            "zh" => self
+                .translations_zh
+                .get(&area_key)
+                .cloned()
+                .unwrap_or_else(|| entry.area.clone()),
+            "ja" => self
+                .translations_ja
+                .get(&area_key)
+                .cloned()
+                .unwrap_or_else(|| entry.area.clone()),
+            _ => entry.area.clone(),
+        }
     }
 }
 
@@ -87,7 +141,7 @@ impl Plugin for WinSettingsPlugin {
                 .iter()
                 .take(self.max_results)
                 .enumerate()
-                .map(|(i, e)| entry_to_result(e, 750 - i as u32))
+                .map(|(i, e)| self.entry_to_result(e, 750 - i as u32))
                 .collect();
         }
 
@@ -97,17 +151,19 @@ impl Plugin for WinSettingsPlugin {
             .filter_map(|e| {
                 let name_lower = e.name.to_lowercase();
                 let display = Self::display_name(&e.name).to_lowercase();
+                let translated = self.translated_name(e).to_lowercase();
                 let area_lower = e.area.to_lowercase();
+                let translated_area = self.translated_area(e).to_lowercase();
 
                 let mut score: u32 = 0;
 
-                if display.starts_with(&q) {
+                if translated.starts_with(&q) || display.starts_with(&q) {
                     score = 900;
-                } else if name_lower.contains(&q) {
+                } else if name_lower.contains(&q) || translated.contains(&q) {
                     score = 800;
                 } else if display.contains(&q) {
                     score = 750;
-                } else if area_lower.contains(&q) {
+                } else if area_lower.contains(&q) || translated_area.contains(&q) {
                     score = 600;
                 } else if e.command.to_lowercase().contains(&q) {
                     score = 500;
@@ -133,7 +189,7 @@ impl Plugin for WinSettingsPlugin {
 
         scored
             .into_iter()
-            .map(|(e, score)| entry_to_result(e, score))
+            .map(|(e, score)| self.entry_to_result(e, score))
             .collect()
     }
 
@@ -203,23 +259,26 @@ impl Plugin for WinSettingsPlugin {
     }
 }
 
-fn entry_to_result(e: &SettingsEntry, score: u32) -> PluginResult {
-    let display_name = WinSettingsPlugin::display_name(&e.name);
-    let subtitle = if e.area.is_empty() {
-        e.command.clone()
-    } else {
-        format!("{} - {}", e.area, e.command)
-    };
+impl WinSettingsPlugin {
+    fn entry_to_result(&self, e: &SettingsEntry, score: u32) -> PluginResult {
+        let display_name = self.translated_name(e);
+        let area = self.translated_area(e);
+        let subtitle = if area.is_empty() {
+            e.command.clone()
+        } else {
+            format!("{} - {}", area, e.command)
+        };
 
-    PluginResult {
-        title: display_name,
-        subtitle,
-        icon: String::from("settings"),
-        action: Action::Open(e.command.clone()),
-        score,
-        highlight: Vec::new(),
-        context_actions: Vec::new(),
-        context_data: None,
+        PluginResult {
+            title: display_name,
+            subtitle,
+            icon: String::from("settings"),
+            action: Action::Open(e.command.clone()),
+            score,
+            highlight: Vec::new(),
+            context_actions: Vec::new(),
+            context_data: None,
+        }
     }
 }
 

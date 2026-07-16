@@ -25,6 +25,8 @@
 //! └── data\
 //!     └── quick_launch.json
 //! ```
+//!
+//! The exe can be placed anywhere — all data is always in `%LOCALAPPDATA%\EasySearch\`.
 
 use std::path::PathBuf;
 
@@ -53,16 +55,13 @@ pub fn app_root_dir() -> PathBuf {
 // Settings
 // ────────────────────────────────────────────────────────────────────────────
 
-/// Path to the main settings file.
-///
-/// Uses the exe's own directory so it works portably without needing
-/// `%LOCALAPPDATA%` to be writable.
+/// Path to the main settings file: `<app_root>/settings.json`
 #[must_use]
 pub fn settings_file() -> PathBuf {
-    exe_dir().join("settings.json")
+    app_root_dir().join("settings.json")
 }
 
-/// Directory where the running exe lives.
+/// Directory where the running exe lives (used only for log file placement).
 #[must_use]
 pub fn exe_dir() -> PathBuf {
     std::env::current_exe()
@@ -76,30 +75,30 @@ pub fn exe_dir() -> PathBuf {
 // Cache — Index
 // ────────────────────────────────────────────────────────────────────────────
 
-/// Directory for MFT `.uffs` index cache files: `<exe_dir>/cache/index/`
+/// Directory for MFT `.uffs` index cache files: `<app_root>/cache/index/`
 #[must_use]
 pub fn index_cache_dir() -> PathBuf {
-    exe_dir().join("cache").join("index")
+    app_root_dir().join("cache").join("index")
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // Cache — FlowCache
 // ────────────────────────────────────────────────────────────────────────────
 
-/// Directory for `.flowcache` files: `<exe_dir>/cache/flow/`
+/// Directory for `.flowcache` files: `<app_root>/cache/flow/`
 #[must_use]
 pub fn flow_cache_dir() -> PathBuf {
-    exe_dir().join("cache").join("flow")
+    app_root_dir().join("cache").join("flow")
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // Cache — Plugins
 // ────────────────────────────────────────────────────────────────────────────
 
-/// Directory for plugin cache files: `<exe_dir>/cache/plugins/<plugin_name>/`
+/// Directory for plugin cache files: `<app_root>/cache/plugins/<plugin_name>/`
 #[must_use]
 pub fn plugin_cache_dir(plugin_name: &str) -> PathBuf {
-    exe_dir()
+    app_root_dir()
         .join("cache")
         .join("plugins")
         .join(plugin_name)
@@ -109,10 +108,10 @@ pub fn plugin_cache_dir(plugin_name: &str) -> PathBuf {
 // Data
 // ────────────────────────────────────────────────────────────────────────────
 
-/// Directory for user data files: `<exe_dir>/data/`
+/// Directory for user data files: `<app_root>/data/`
 #[must_use]
 pub fn data_dir() -> PathBuf {
-    exe_dir().join("data")
+    app_root_dir().join("data")
 }
 
 /// Path to the quick launch store file: `<root>/data/quick_launch.json`

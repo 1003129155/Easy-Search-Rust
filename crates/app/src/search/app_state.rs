@@ -92,6 +92,13 @@ pub(super) struct AppState {
     /// Number of committed IME chars whose follow-up `WM_CHAR` messages should
     /// be ignored to avoid duplicating CJK input.
     pub(super) pending_ime_char_suppression: usize,
+    /// Whether focus is on the input box (true) or the result list (false).
+    /// When true, arrow left/right move cursor; up does nothing; only down
+    /// transfers focus to results. Mirrors Flow.Launcher's behavior.
+    pub(super) input_focused: bool,
+    /// Timestamp (millis since epoch) when the cursor was last moved,
+    /// used to keep the cursor visible immediately after movement.
+    pub(super) cursor_moved_at: u128,
 }
 
 // ─── Thread-local storage ───────────────────────────────────────────────────

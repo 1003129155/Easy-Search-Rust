@@ -60,12 +60,18 @@ pub(super) fn do_render() {
             app.input.selection_range(),
             app.input.has_selection(),
             &app.items,
-            app.selected_index,
+            // When input is focused, pass 0 to keep scroll at top but use a flag
+            // to prevent highlighting. We use a sentinel: items.len() won't match
+            // any valid index (0..len-1), so no item gets highlighted, but we need
+            // scroll at top — so pass 0 when input_focused.
+            if app.input_focused { 0 } else { app.selected_index },
             placeholder,
             &mut app.icon_cache,
             anim_progress,
             app.search_active,
             preview_param,
+            app.input_focused,
+            app.cursor_moved_at,
         );
 
         let icon_requests = app.icon_cache.take_load_requests();

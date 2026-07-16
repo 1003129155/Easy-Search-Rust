@@ -148,8 +148,8 @@ impl Plugin for BookmarkPlugin {
 
     fn display_name(&self, locale: &str) -> String {
         match locale_prefix(locale) {
-            "zh" => "涔︾",
-            "ja" => "銉栥儍銈優銉笺偗",
+            "zh" => "书签",
+            "ja" => "ブックマーク",
             _ => "Bookmark",
         }
         .to_string()
@@ -161,9 +161,9 @@ impl Plugin for BookmarkPlugin {
 
     fn description_for_locale(&self, locale: &str) -> String {
         match locale_prefix(locale) {
-            "zh" => "鎼滅储 Chrome銆丒dge銆丅rave 鍜?Firefox 鐨勬祻瑙堝櫒涔︾".to_string(),
+            "zh" => "搜索 Chrome、Edge、Brave 和 Firefox 的浏览器书签".to_string(),
             "ja" => {
-                "Chrome銆丒dge銆丅rave銆丗irefox 銇儢銉┿偊銈躲兗銉栥儍銈優銉笺偗銈掓绱仐銇俱仚"
+                "Chrome、Edge、Brave、Firefox のブラウザーブックマークを検索します"
                     .to_string()
             }
             _ => self.description().to_string(),

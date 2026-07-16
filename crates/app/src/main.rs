@@ -27,13 +27,14 @@ static LOG_FILE: std::sync::OnceLock<Mutex<std::fs::File>> = std::sync::OnceLock
 /// Max log file size before rotation (2 MB).
 const LOG_MAX_SIZE: u64 = 2 * 1024 * 1024;
 
-/// Initialize the log file next to the exe.
+/// Initialize the log file in the app data directory.
 /// If the existing log exceeds [`LOG_MAX_SIZE`], rename it to `.log.old`
 /// and start a fresh file.
 fn init_log() {
-    let log_path = std::env::current_exe()
-        .unwrap_or_default()
-        .with_file_name("easysearch.log");
+    let log_dir = easysearch_core::paths::app_root_dir();
+    // Ensure the directory exists
+    let _ = std::fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join("easysearch.log");
 
     // Simple rotation: keep at most one old file
     if let Ok(meta) = std::fs::metadata(&log_path) {
@@ -43,28 +44,16 @@ fn init_log() {
         }
     }
 
-    // Fallback: if exe directory is not writable, try %LOCALAPPDATA%\EasySearch\
     let file = OpenOptions::new()
         .create(true)
         .write(true)
         .append(true)
-        .open(&log_path)
-        .or_else(|_| {
-            let fallback = easysearch_core::paths::app_root_dir().join("easysearch.log");
-            if let Some(parent) = fallback.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            OpenOptions::new()
-                .create(true)
-                .write(true)
-                .append(true)
-                .open(&fallback)
-        });
+        .open(&log_path);
 
     if let Ok(f) = file {
         LOG_FILE.set(Mutex::new(f)).ok();
     }
-    // If both fail, logging is silently disabled (program still runs)
+    // If it fails, logging is silently disabled (program still runs)
 }
 
 /// Write a line to the log file.

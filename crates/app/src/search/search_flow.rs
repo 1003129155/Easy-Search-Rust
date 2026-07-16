@@ -29,6 +29,11 @@ pub(super) fn on_input_changed(app: &mut AppState) {
     app.context_selected_index = 0;
     app.context_source_index = None;
     app.current_search_seq += 1;
+    app.input_focused = true;
+    app.cursor_moved_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
     // Clear async preview
     app.preview = None;
     app.preview_seq += 1;

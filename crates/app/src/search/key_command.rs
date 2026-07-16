@@ -86,15 +86,16 @@ pub(super) enum DeferredAction {
 /// Decode a raw WM_KEYDOWN event into a [`KeyCommand`].
 ///
 /// This function reads the virtual-key code and modifier state, but does NOT
-/// access application state.  The caller supplies `view_mode` and `is_hint`
-/// so that the decoder can make context-sensitive decisions without holding
-/// a borrow.
+/// access application state.  The caller supplies `view_mode`, `is_hint`,
+/// and `input_focused` so that the decoder can make context-sensitive
+/// decisions without holding a borrow.
 #[cfg(windows)]
 pub(super) fn decode_key_command(
     wparam: WPARAM,
     view_mode: ViewMode,
     is_hint: bool,
     input_empty: bool,
+    input_focused: bool,
 ) -> KeyCommand {
     let vk = wparam.0 as u16;
     let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
@@ -129,7 +130,14 @@ pub(super) fn decode_key_command(
             }
         }
         v if ctrl && v == 0x4F => KeyCommand::OpenContext,
-        v if v == VK_UP.0 => KeyCommand::SelectUp,
+        v if v == VK_UP.0 => {
+            if input_focused {
+                // When input is focused, Up does nothing.
+                KeyCommand::None
+            } else {
+                KeyCommand::SelectUp
+            }
+        }
         v if v == VK_DOWN.0 => KeyCommand::SelectDown,
         v if v == VK_BACK.0 => KeyCommand::Backspace,
         v if v == VK_DELETE.0 => KeyCommand::Delete,
@@ -143,7 +151,10 @@ pub(super) fn decode_key_command(
             }
         }
         v if v == VK_RIGHT.0 => {
-            if view_mode == ViewMode::Results {
+            if input_focused {
+                // When input is focused, Right moves cursor.
+                KeyCommand::CursorRight
+            } else if view_mode == ViewMode::Results {
                 KeyCommand::OpenContext
             } else {
                 KeyCommand::CursorRight
@@ -176,7 +187,9 @@ pub(super) fn execute_key_command(
             } else if app.selected_index > 0 {
                 app.selected_index -= 1;
             } else {
-                app.selected_index = app.items.len() - 1;
+                // At the first result, pressing Up returns focus to input box
+                // instead of wrapping to the last result.
+                app.input_focused = true;
             }
             match app.view_mode {
                 ViewMode::Results => {
@@ -189,19 +202,31 @@ pub(super) fn execute_key_command(
             DeferredAction::None
         }
         KeyCommand::SelectDown => {
-            if !app.items.is_empty() {
+            if app.input_focused {
+                // Transfer focus from input box to result list
+                app.input_focused = false;
+                app.selected_index = 0;
+                match app.view_mode {
+                    ViewMode::Results => {
+                        app.result_selected_index = 0;
+                    }
+                    ViewMode::ContextActions => {
+                        app.context_selected_index = 0;
+                    }
+                }
+            } else if !app.items.is_empty() {
                 if app.selected_index < app.items.len() - 1 {
                     app.selected_index += 1;
                 } else {
                     app.selected_index = 0;
                 }
-            }
-            match app.view_mode {
-                ViewMode::Results => {
-                    app.result_selected_index = app.selected_index;
-                }
-                ViewMode::ContextActions => {
-                    app.context_selected_index = app.selected_index;
+                match app.view_mode {
+                    ViewMode::Results => {
+                        app.result_selected_index = app.selected_index;
+                    }
+                    ViewMode::ContextActions => {
+                        app.context_selected_index = app.selected_index;
+                    }
                 }
             }
             DeferredAction::None
@@ -224,18 +249,22 @@ pub(super) fn execute_key_command(
         }
         KeyCommand::Home => {
             app.input.move_home(shift);
+            app.cursor_moved_at = current_time_millis();
             DeferredAction::None
         }
         KeyCommand::End => {
             app.input.move_end(shift);
+            app.cursor_moved_at = current_time_millis();
             DeferredAction::None
         }
         KeyCommand::CursorLeft => {
             app.input.move_left(shift);
+            app.cursor_moved_at = current_time_millis();
             DeferredAction::None
         }
         KeyCommand::CursorRight => {
             app.input.move_right(shift);
+            app.cursor_moved_at = current_time_millis();
             DeferredAction::None
         }
         KeyCommand::SelectAll => {
@@ -292,4 +321,14 @@ pub(super) fn execute_key_command(
         }
         KeyCommand::None => DeferredAction::None,
     }
+}
+
+
+/// Get current time in milliseconds since UNIX epoch.
+#[cfg(windows)]
+fn current_time_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }

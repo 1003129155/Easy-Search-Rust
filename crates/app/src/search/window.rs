@@ -206,6 +206,8 @@ pub fn run() -> Result<(), String> {
         index_status: String::new(),
         index_error: None,
         pending_ime_char_suppression: 0,
+        input_focused: true,
+        cursor_moved_at: 0,
     });
 
     // Start settings poll timer
@@ -632,6 +634,7 @@ unsafe extern "system" fn wnd_proc(
                                         app.context_source_index = None;
                                         app.view_mode = ViewMode::Results;
                                         app.pending_ime_char_suppression = 0;
+                                        app.input_focused = true;
                                     }
                                                         });
                     }
@@ -916,6 +919,7 @@ unsafe extern "system" fn wnd_proc(
                 };
 
                 set_active_selection(app, index);
+                app.input_focused = false;
                 if is_right_click && app.view_mode == ViewMode::Results {
                     2
                 } else {
@@ -953,9 +957,10 @@ fn handle_keydown(wparam: WPARAM) {
             && matches!(app.items[idx].action, easysearch_core::Action::None);
         let input_empty = app.input.text().trim().is_empty();
         let vm = app.view_mode;
-        (vm, input_empty, is_hint)
+        let focused = app.input_focused;
+        (vm, input_empty, is_hint, focused)
     })
-    .map(|(vm, empty, hint)| super::key_command::decode_key_command(wparam, vm, hint, empty))
+    .map(|(vm, empty, hint, focused)| super::key_command::decode_key_command(wparam, vm, hint, empty, focused))
     .unwrap_or(super::key_command::KeyCommand::None);
 
     let deferred = app_state::with_app_mut(|app| {

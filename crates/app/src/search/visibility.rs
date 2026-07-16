@@ -205,6 +205,7 @@ pub(super) fn hide_window() {
         app.context_source_index = None;
         app.view_mode = ViewMode::Results;
         app.pending_ime_char_suppression = 0;
+        app.input_focused = true;
         Some(h)
     })
     .flatten();
@@ -311,4 +312,5 @@ pub(super) fn hide_window_inner(app: &mut super::app_state::AppState) {
     app.context_source_index = None;
     app.pending_ime_char_suppression = 0;
     app.view_mode = ViewMode::Results;
+    app.input_focused = true;
 }
