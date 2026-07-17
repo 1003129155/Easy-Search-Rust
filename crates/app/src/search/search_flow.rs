@@ -6,13 +6,13 @@
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 #[cfg(windows)]
+use super::app_state::{AppState, DeferredQuery, ViewMode};
+#[cfg(windows)]
 use super::layout;
 #[cfg(windows)]
 use super::messages::*;
 #[cfg(windows)]
 use super::plugin_bridge::{build_home_screen, plugin_results_to_display};
-#[cfg(windows)]
-use super::app_state::{AppState, DeferredQuery, ViewMode};
 #[cfg(windows)]
 use super::window::sync_active_items;
 
@@ -43,18 +43,17 @@ pub(super) fn on_input_changed(app: &mut AppState) {
     unsafe {
         let _ = KillTimer(Some(app.hwnd), DEFERRED_POLL_TIMER_ID);
         let _ = KillTimer(Some(app.hwnd), SEARCH_DEBOUNCE_TIMER_ID);
+        let _ = KillTimer(Some(app.hwnd), BUSY_ANIM_TIMER_ID);
     }
 
     if query.trim().is_empty() {
+        app.plugin_router.reset_search_sessions();
         // Home screen: top-1 recent → plugin hints → remaining recent (max 10).
         app.plugin_items.clear();
         app.result_items =
             build_home_screen(&app.history, &app.plugin_router, app.i18n.current_locale());
         app.anim_frame = ANIM_TOTAL_FRAMES;
         app.search_active = false;
-        unsafe {
-            let _ = KillTimer(Some(app.hwnd), BUSY_ANIM_TIMER_ID);
-        }
     } else {
         app.search_active = true;
         app.anim_frame = 0;
@@ -65,7 +64,6 @@ pub(super) fn on_input_changed(app: &mut AppState) {
                 SEARCH_DEBOUNCE_MS,
                 None,
             );
-            let _ = SetTimer(Some(app.hwnd), BUSY_ANIM_TIMER_ID, ANIM_FRAME_MS, None);
         }
     }
 
@@ -107,6 +105,7 @@ pub(super) fn run_debounced_search(app: &mut AppState) {
                 DEFERRED_POLL_MS,
                 None,
             );
+            let _ = SetTimer(Some(app.hwnd), BUSY_ANIM_TIMER_ID, ANIM_FRAME_MS, None);
         }
     } else {
         app.search_active = false;

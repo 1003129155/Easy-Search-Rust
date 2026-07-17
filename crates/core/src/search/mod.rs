@@ -65,24 +65,41 @@ pub fn score_name(
         return Some((directory_bonus(is_directory), Vec::new()));
     }
 
-    let name_folded = fold_text(name);
-    let base_score = if name_folded == query_folded {
-        1_000
-    } else if name_folded.starts_with(query_folded) {
-        900
-    } else if name_folded.contains(query_folded) {
-        800
+    let (base_score, match_start) = if query_folded.is_ascii() && name.is_ascii() {
+        let start = find_ascii_case_insensitive(name.as_bytes(), query_folded.as_bytes())?;
+        let score = if name.len() == query_folded.len() {
+            1_000
+        } else if start == 0 {
+            900
+        } else {
+            800
+        };
+        (score, start)
     } else {
-        return None;
+        let name_folded = fold_text(name);
+        let start = name_folded.find(query_folded)?;
+        let score = if name_folded == query_folded {
+            1_000
+        } else if start == 0 {
+            900
+        } else {
+            800
+        };
+        (score, start)
     };
 
-    let highlight = name_folded
-        .find(query_folded)
-        .map_or_else(Vec::new, |start| {
-            vec![[bounded_u32(start), bounded_u32(query_folded.len())]]
-        });
+    let highlight = vec![[bounded_u32(match_start), bounded_u32(query_folded.len())]];
 
     Some((base_score + directory_bonus(is_directory), highlight))
+}
+
+fn find_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle))
 }
 
 /// Return the directory score bonus.
@@ -111,5 +128,19 @@ mod tests {
         let file = score_name("abc", "abc", false).unwrap().0;
         let directory = score_name("abc", "abc", true).unwrap().0;
         assert_eq!(directory - file, 100);
+    }
+
+    #[test]
+    fn ascii_matching_is_case_insensitive_and_highlights_original_offset() {
+        let (score, highlight) = score_name("needle", "PrefixNEEDLE.txt", false).unwrap();
+        assert_eq!(score, 800);
+        assert_eq!(highlight, vec![[6, 6]]);
+    }
+
+    #[test]
+    fn unicode_matching_keeps_folded_fallback() {
+        let (score, highlight) = score_name("搜索", "快速搜索工具", false).unwrap();
+        assert_eq!(score, 800);
+        assert_eq!(highlight, vec![[6, 6]]);
     }
 }

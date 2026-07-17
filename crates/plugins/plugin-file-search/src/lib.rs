@@ -6,12 +6,13 @@
 //! and converts `EsSearchResult` into `PluginResult`.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use easysearch_core::{
-    Action, ContextAction, ContextData, EsSearchResult, Plugin, PluginResult,
+    Action, CancelToken, ContextAction, ContextData, EsSearchResult, Plugin, PluginResult,
 };
-use easysearch_engine::{SearchEngine, SearchFilter, SearchQuery};
+use easysearch_engine::{SearchEngine, SearchSession};
 use quick_launch_store::global_store;
 
 const MAX_FILE_RESULTS: usize = 50;
@@ -19,13 +20,79 @@ const MAX_FILE_RESULTS: usize = 50;
 /// File search plugin that wraps the search engine.
 pub struct FileSearchPlugin {
     engine: Arc<SearchEngine>,
+    session: Mutex<SearchSession>,
+    reset_requested: AtomicBool,
 }
 
 impl FileSearchPlugin {
     /// Create a new file search plugin backed by the given engine instance.
     #[must_use]
     pub fn new(engine: Arc<SearchEngine>) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            session: Mutex::new(SearchSession::new()),
+            reset_requested: AtomicBool::new(false),
+        }
+    }
+
+    fn query_inner(&self, query: &str, cancel: Option<&CancelToken>) -> Vec<PluginResult> {
+        let q = query.trim();
+        if q.is_empty() {
+            self.reset_search_session();
+            return Vec::new();
+        }
+
+        let results = if q.starts_with('\\') {
+            self.reset_search_session();
+            let path = q.trim_start_matches('\\');
+            match cancel {
+                Some(token) => self
+                    .engine
+                    .enumerate_with_cancel(path, "", false, MAX_FILE_RESULTS, token.as_ref())
+                    .unwrap_or_default(),
+                None => self
+                    .engine
+                    .enumerate(path, "", false, MAX_FILE_RESULTS)
+                    .unwrap_or_default(),
+            }
+        } else {
+            let mut session = self
+                .session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.reset_requested.swap(false, Ordering::AcqRel) {
+                session.reset();
+            }
+            let results = match cancel {
+                Some(token) => self.engine.search_with_session_and_cancel(
+                    &mut session,
+                    q,
+                    MAX_FILE_RESULTS,
+                    token.as_ref(),
+                ),
+                None => self
+                    .engine
+                    .search_with_session(&mut session, q, MAX_FILE_RESULTS),
+            };
+            if self.reset_requested.swap(false, Ordering::AcqRel) {
+                session.reset();
+            }
+            drop(session);
+            self.finish_pending_reset();
+            results
+        };
+
+        results.into_iter().map(es_result_to_plugin).collect()
+    }
+
+    fn finish_pending_reset(&self) {
+        if self.reset_requested.swap(false, Ordering::AcqRel) {
+            let mut session = self
+                .session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            session.reset();
+        }
     }
 }
 
@@ -44,25 +111,19 @@ impl Plugin for FileSearchPlugin {
     }
 
     fn query(&self, query: &str) -> Vec<PluginResult> {
-        let q = query.trim();
-        if q.is_empty() {
-            return Vec::new();
-        }
+        self.query_inner(query, None)
+    }
 
-        // Path-prefix search mode: "\C:\path\" lists all items under that directory.
-        if q.starts_with('\\') {
-            let prefix = q.trim_start_matches('\\');
-            let search_query = SearchQuery::new("", MAX_FILE_RESULTS)
-                .with_filter(SearchFilter {
-                    path_prefix: Some(prefix.to_string()),
-                    ..Default::default()
-                });
-            let results = self.engine.search_query(&search_query);
-            return results.into_iter().map(|r| es_result_to_plugin(r)).collect();
-        }
+    fn query_with_cancel(&self, query: &str, cancel: &CancelToken) -> Vec<PluginResult> {
+        self.query_inner(query, Some(cancel))
+    }
 
-        let results = self.engine.search(q, MAX_FILE_RESULTS);
-        results.into_iter().map(|r| es_result_to_plugin(r)).collect()
+    fn reset_search_session(&self) {
+        self.reset_requested.store(true, Ordering::Release);
+        if let Ok(mut session) = self.session.try_lock() {
+            session.reset();
+            self.reset_requested.store(false, Ordering::Release);
+        }
     }
 
     fn name(&self) -> &str {

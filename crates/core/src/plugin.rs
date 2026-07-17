@@ -5,7 +5,7 @@
 //! Defines the [`Plugin`] trait and common types shared by all plugins.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 
 use serde::{Deserialize, Serialize};
 
@@ -120,6 +120,24 @@ pub trait Plugin: Send + Sync {
     /// will be called from a background thread, not the UI thread.
     fn query(&self, query: &str) -> Vec<PluginResult>;
 
+    /// Produce results while observing a cancellation token.
+    ///
+    /// Long-running plugins should override this and pass the token into their
+    /// inner search loop. The default keeps fast plugins source-compatible.
+    fn query_with_cancel(&self, query: &str, cancel: &CancelToken) -> Vec<PluginResult> {
+        if cancel.load(Ordering::Relaxed) {
+            Vec::new()
+        } else {
+            self.query(query)
+        }
+    }
+
+    /// Release memory owned by the current logical input/search session.
+    ///
+    /// Stateful background plugins may override this. Implementations must not
+    /// block the UI thread while an obsolete background query is winding down.
+    fn reset_search_session(&self) {}
+
     /// Human-readable name of this plugin.
     fn name(&self) -> &str;
 
@@ -220,11 +238,46 @@ pub enum SettingControl {
 /// Router dispatches queries to the appropriate plugin(s).
 pub struct Router {
     plugins: Vec<PluginSlot>,
+    background_tx: mpsc::Sender<BackgroundRequest>,
 }
 
 /// Cancellation token for background plugin queries.
 /// Set to `true` to signal the background thread to abort early.
 pub type CancelToken = Arc<AtomicBool>;
+
+struct BackgroundRequest {
+    tasks: Vec<(String, Arc<dyn Plugin>)>,
+    result_tx: mpsc::Sender<Vec<PluginResult>>,
+    cancel: CancelToken,
+}
+
+fn spawn_background_worker() -> mpsc::Sender<BackgroundRequest> {
+    let (tx, rx) = mpsc::channel::<BackgroundRequest>();
+    std::thread::Builder::new()
+        .name("plugin-background".into())
+        .spawn(move || {
+            while let Ok(request) = rx.recv() {
+                if request.cancel.load(Ordering::Relaxed) {
+                    continue;
+                }
+
+                let mut all_results = Vec::new();
+                for (stripped_query, plugin) in request.tasks {
+                    if request.cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    all_results.extend(plugin.query_with_cancel(&stripped_query, &request.cancel));
+                }
+
+                if !request.cancel.load(Ordering::Relaxed) {
+                    all_results.sort_by_key(|result| std::cmp::Reverse(result.score));
+                    let _ = request.result_tx.send(all_results);
+                }
+            }
+        })
+        .expect("failed to spawn plugin background worker");
+    tx
+}
 
 /// A registered plugin with its runtime-configurable keyword.
 struct PluginSlot {
@@ -249,7 +302,10 @@ impl Router {
     /// Create a new empty router.
     #[must_use]
     pub fn new() -> Self {
-        Self { plugins: Vec::new() }
+        Self {
+            plugins: Vec::new(),
+            background_tx: spawn_background_worker(),
+        }
     }
 
     /// Register a plugin with the router (uses default keyword).
@@ -264,15 +320,30 @@ impl Router {
     /// Set a custom keyword for a plugin by name.
     /// Pass `Some("kw ")` to set a keyword, or `None` to make it a global plugin.
     pub fn set_keyword(&mut self, plugin_name: &str, keyword: Option<String>) {
-        if let Some(slot) = self.plugins.iter_mut().find(|s| s.plugin.name() == plugin_name) {
+        if let Some(slot) = self
+            .plugins
+            .iter_mut()
+            .find(|s| s.plugin.name() == plugin_name)
+        {
             slot.keyword_override = Some(keyword);
         }
     }
 
     /// Enable or disable a plugin by name.
     pub fn set_enabled(&mut self, plugin_name: &str, enabled: bool) {
-        if let Some(slot) = self.plugins.iter_mut().find(|s| s.plugin.name() == plugin_name) {
+        if let Some(slot) = self
+            .plugins
+            .iter_mut()
+            .find(|s| s.plugin.name() == plugin_name)
+        {
             slot.enabled = enabled;
+        }
+    }
+
+    /// Ask all plugins to release per-input-session caches.
+    pub fn reset_search_sessions(&self) {
+        for slot in &self.plugins {
+            slot.plugin.reset_search_session();
         }
     }
 
@@ -477,28 +548,20 @@ impl Router {
             return None;
         }
 
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
-        let cancel_clone = Arc::clone(&cancel);
 
-        std::thread::Builder::new()
-            .name("plugin-background".into())
-            .spawn(move || {
-                let mut all_results = Vec::new();
-                for (stripped_query, plugin) in tasks {
-                    // Check cancellation before each plugin invocation
-                    if cancel_clone.load(Ordering::Relaxed) {
-                        return; // cancelled — drop without sending
-                    }
-                    all_results.extend(plugin.query(&stripped_query));
-                }
-                // Check one more time before the final sort + send
-                if !cancel_clone.load(Ordering::Relaxed) {
-                    all_results.sort_by(|a, b| b.score.cmp(&a.score));
-                    let _ = tx.send(all_results);
-                }
+        if self
+            .background_tx
+            .send(BackgroundRequest {
+                tasks,
+                result_tx: tx,
+                cancel: Arc::clone(&cancel),
             })
-            .ok();
+            .is_err()
+        {
+            cancel.store(true, Ordering::Relaxed);
+        }
 
         Some((rx, cancel))
     }
@@ -594,5 +657,101 @@ pub struct PluginRouterInfo {
 impl Default for Router {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::{Duration, Instant};
+
+    struct CancellablePlugin {
+        started: Arc<AtomicUsize>,
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+    }
+
+    impl Plugin for CancellablePlugin {
+        fn default_keyword(&self) -> Option<&str> {
+            None
+        }
+
+        fn matches(&self, _query: &str) -> bool {
+            true
+        }
+
+        fn needs_background(&self) -> bool {
+            true
+        }
+
+        fn query(&self, query: &str) -> Vec<PluginResult> {
+            self.result(query)
+        }
+
+        fn query_with_cancel(&self, query: &str, cancel: &CancelToken) -> Vec<PluginResult> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            self.started.fetch_add(1, Ordering::SeqCst);
+
+            if query == "first" {
+                while !cancel.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+            }
+
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            if cancel.load(Ordering::SeqCst) {
+                Vec::new()
+            } else {
+                self.result(query)
+            }
+        }
+
+        fn name(&self) -> &str {
+            "Cancellable"
+        }
+    }
+
+    impl CancellablePlugin {
+        fn result(&self, query: &str) -> Vec<PluginResult> {
+            vec![PluginResult {
+                title: query.to_string(),
+                subtitle: String::new(),
+                icon: String::new(),
+                action: Action::None,
+                score: 1,
+                highlight: Vec::new(),
+                context_actions: Vec::new(),
+                context_data: None,
+            }]
+        }
+    }
+
+    #[test]
+    fn background_worker_cancels_old_query_before_running_latest() {
+        let started = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let mut router = Router::new();
+        router.register(Box::new(CancellablePlugin {
+            started: Arc::clone(&started),
+            active,
+            max_active: Arc::clone(&max_active),
+        }));
+
+        let (_first_rx, first_cancel) = router.query_background("first", false).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while started.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+
+        first_cancel.store(true, Ordering::SeqCst);
+        let (latest_rx, _latest_cancel) = router.query_background("latest", false).unwrap();
+        let latest = latest_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        assert_eq!(latest[0].title, "latest");
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
     }
 }

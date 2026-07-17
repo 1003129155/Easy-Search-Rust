@@ -7,14 +7,18 @@
 //! events produced by the poll loop.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use easysearch_core::index::EsIndex;
 use easysearch_core::usn::EsUsnEvent;
+
+use crate::search_session::{CandidateSearchOutput, DriveCandidateSet};
 
 /// Owns the loaded indexes, one per drive.
 #[derive(Debug, Default)]
 pub struct DriveManager {
     indexes: Vec<(char, EsIndex)>,
+    generation: u64,
 }
 
 impl DriveManager {
@@ -62,10 +66,20 @@ impl DriveManager {
             .map(|(_, idx)| idx)
     }
 
+    /// Monotonic version of the loaded logical record space.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Remove a drive's index from the manager.
     pub fn remove(&mut self, drive_letter: char) {
         let letter = drive_letter.to_ascii_uppercase();
+        let old_len = self.indexes.len();
         self.indexes.retain(|(l, _)| *l != letter);
+        if self.indexes.len() != old_len {
+            self.bump_generation();
+        }
     }
 
     /// Install (or replace) the index for `drive_letter`.
@@ -73,6 +87,7 @@ impl DriveManager {
         let letter = drive_letter.to_ascii_uppercase();
         self.indexes.retain(|(l, _)| *l != letter);
         self.indexes.push((letter, index));
+        self.bump_generation();
     }
 
     /// Return the USN cursor `(journal_id, last_usn)` for a drive, if loaded.
@@ -98,28 +113,105 @@ impl DriveManager {
             index.apply_events(events);
             index.status.last_usn = new_last_usn;
             index.status.journal_id = journal_id;
+            if !events.is_empty() {
+                self.bump_generation();
+            }
         }
     }
 
     /// Search across all loaded indexes.
     pub fn search(&self, query: &str, limit: usize) -> Vec<easysearch_core::EsSearchResult> {
+        self.search_inner(query, limit, None)
+    }
+
+    /// Search all loaded indexes while observing cancellation.
+    pub fn search_with_cancel(
+        &self,
+        query: &str,
+        limit: usize,
+        cancel: &AtomicBool,
+    ) -> Vec<easysearch_core::EsSearchResult> {
+        self.search_inner(query, limit, Some(cancel))
+    }
+
+    fn search_inner(
+        &self,
+        query: &str,
+        limit: usize,
+        cancel: Option<&AtomicBool>,
+    ) -> Vec<easysearch_core::EsSearchResult> {
         let mut all_results = Vec::new();
         for (_, index) in &self.indexes {
-            let results = index.search(query, limit);
+            if cancel.is_some_and(|token| token.load(Ordering::Relaxed)) {
+                return Vec::new();
+            }
+            let results = match cancel {
+                Some(token) => index.search_with_cancel(query, limit, token),
+                None => index.search(query, limit),
+            };
             all_results.extend(results);
         }
-        // Prefer stronger matches first, then shallower/shorter paths so
-        // broad queries keep predictable, user-near results near the top.
-        all_results.sort_unstable_by(|left, right| {
-            right
-                .score
-                .cmp(&left.score)
-                .then_with(|| path_depth(&left.path).cmp(&path_depth(&right.path)))
-                .then_with(|| left.path.len().cmp(&right.path.len()))
-                .then_with(|| left.path.to_lowercase().cmp(&right.path.to_lowercase()))
-        });
-        all_results.truncate(limit);
+        rank_and_limit(&mut all_results, limit);
         all_results
+    }
+
+    pub(crate) fn search_candidates(
+        &self,
+        query: &str,
+        source: Option<&[DriveCandidateSet]>,
+        limit: usize,
+        max_candidates: usize,
+        cancel: &AtomicBool,
+    ) -> CandidateSearchOutput {
+        let mut all_results = Vec::new();
+        let mut drive_candidates = Some(Vec::with_capacity(self.indexes.len()));
+        let mut remaining_candidates = max_candidates;
+
+        for (drive, index) in &self.indexes {
+            if cancel.load(Ordering::Relaxed) {
+                return CandidateSearchOutput {
+                    results: Vec::new(),
+                    drives: None,
+                };
+            }
+
+            let source_ids = source.and_then(|sets| {
+                sets.iter()
+                    .find(|candidate_set| candidate_set.drive == *drive)
+                    .map(|candidate_set| candidate_set.ids.as_slice())
+            });
+            let search = match source_ids {
+                Some(ids) => index.search_candidate_ids_with_cancel(
+                    query,
+                    ids,
+                    limit,
+                    remaining_candidates,
+                    cancel,
+                ),
+                None => index.search_collect_candidates_with_cancel(
+                    query,
+                    limit,
+                    remaining_candidates,
+                    cancel,
+                ),
+            };
+            all_results.extend(search.results);
+
+            match (&mut drive_candidates, search.candidate_ids) {
+                (Some(sets), Some(ids)) => {
+                    remaining_candidates = remaining_candidates.saturating_sub(ids.len());
+                    sets.push(DriveCandidateSet { drive: *drive, ids });
+                }
+                (_, None) => drive_candidates = None,
+                (None, Some(_)) => {}
+            }
+        }
+
+        rank_and_limit(&mut all_results, limit);
+        CandidateSearchOutput {
+            results: all_results,
+            drives: drive_candidates,
+        }
     }
 
     /// Enumerate a directory path across all loaded indexes.
@@ -130,8 +222,53 @@ impl DriveManager {
         recursive: bool,
         limit: usize,
     ) -> Result<Vec<easysearch_core::EsSearchResult>, String> {
+        self.enumerate_inner(path, query, recursive, limit, None)
+    }
+
+    /// Enumerate a directory while allowing a superseded path query to stop.
+    pub fn enumerate_with_cancel(
+        &self,
+        path: &str,
+        query: &str,
+        recursive: bool,
+        limit: usize,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<easysearch_core::EsSearchResult>, String> {
+        self.enumerate_inner(path, query, recursive, limit, Some(cancel))
+    }
+
+    fn enumerate_inner(
+        &self,
+        path: &str,
+        query: &str,
+        recursive: bool,
+        limit: usize,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Vec<easysearch_core::EsSearchResult>, String> {
+        if cancel.is_some_and(|token| token.load(Ordering::Relaxed)) {
+            return Ok(Vec::new());
+        }
+
+        if let Some(drive) = drive_letter_from_path(path) {
+            let Some(index) = self.index_for(drive) else {
+                return Ok(Vec::new());
+            };
+            let results = match cancel {
+                Some(token) => index.enumerate_with_cancel(path, query, recursive, limit, token),
+                None => index.enumerate(path, query, recursive, limit),
+            };
+            return Ok(results.unwrap_or_default());
+        }
+
         for (_, index) in &self.indexes {
-            match index.enumerate(path, query, recursive, limit) {
+            if cancel.is_some_and(|token| token.load(Ordering::Relaxed)) {
+                return Ok(Vec::new());
+            }
+            let results = match cancel {
+                Some(token) => index.enumerate_with_cancel(path, query, recursive, limit, token),
+                None => index.enumerate(path, query, recursive, limit),
+            };
+            match results {
                 Ok(results) if !results.is_empty() => return Ok(results),
                 Ok(_) => continue,
                 Err(_) => continue,
@@ -139,10 +276,37 @@ impl DriveManager {
         }
         Ok(Vec::new())
     }
+
+    fn bump_generation(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
 }
 
 fn path_depth(path: &str) -> usize {
     path.chars().filter(|&ch| ch == '\\' || ch == '/').count()
+}
+
+fn drive_letter_from_path(path: &str) -> Option<char> {
+    let bytes = path.trim().as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        Some(char::from(bytes[0]).to_ascii_uppercase())
+    } else {
+        None
+    }
+}
+
+fn rank_and_limit(results: &mut Vec<easysearch_core::EsSearchResult>, limit: usize) {
+    // Prefer stronger matches first, then shallower/shorter paths so broad
+    // queries keep predictable, user-near results near the top.
+    results.sort_unstable_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| path_depth(&left.path).cmp(&path_depth(&right.path)))
+            .then_with(|| left.path.len().cmp(&right.path.len()))
+            .then_with(|| left.path.to_lowercase().cmp(&right.path.to_lowercase()))
+    });
+    results.truncate(limit);
 }
 
 /// Build (or hot-load) the [`EsIndex`] for `drive_letter`.
@@ -206,7 +370,9 @@ fn build_index_windows(letter: char, cache_dir: Option<&Path>) -> Result<EsIndex
                             }
                             eprintln!(
                                 "[easysearch-engine] {letter}: loaded from cache (journal_id={}, last_usn={}, records={})",
-                                cached.status.journal_id, cached.status.last_usn, cached.records_len()
+                                cached.status.journal_id,
+                                cached.status.last_usn,
+                                cached.records_len()
                             );
                             return Ok(cached);
                         }

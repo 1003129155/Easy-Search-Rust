@@ -48,13 +48,13 @@ pub(crate) const BUSY_ANIM_TIMER_ID: usize = 104;
 pub(crate) const SETTINGS_POLL_MS: u32 = 2000;
 
 #[cfg(windows)]
-pub(crate) const SEARCH_DEBOUNCE_MS: u32 = 20;
+pub(crate) const SEARCH_DEBOUNCE_MS: u32 = 100;
 
-/// Animation frame interval (~60fps).
+/// Lightweight progress/icon animation interval (~30fps).
 #[cfg(windows)]
-pub(crate) const ANIM_FRAME_MS: u32 = 16;
+pub(crate) const ANIM_FRAME_MS: u32 = 33;
 
-/// Animation duration in frames (16ms x 10 = 160ms, matches Flow.Launcher).
+/// Animation duration in frames.
 #[cfg(windows)]
 pub(crate) const ANIM_TOTAL_FRAMES: u8 = 10;
 
@@ -88,4 +88,5 @@ pub(crate) enum EngineEventPayload {
 pub(crate) struct IconReadyPayload {
     pub(crate) request: super::icon::IconLoadRequest,
     pub(crate) pixels: Option<super::icon::IconPixels>,
+    pub(crate) seq_id: u64,
 }

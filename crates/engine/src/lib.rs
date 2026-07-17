@@ -36,6 +36,7 @@ pub mod drive_manager;
 pub mod event;
 pub mod metrics;
 pub mod query;
+mod search_session;
 pub mod usn_source;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -49,6 +50,7 @@ pub use easysearch_core::EsSearchResult;
 pub use event::{EngineEvent, EventReceiver, EventSender, event_channel};
 pub use metrics::{EngineMetrics, MetricsSnapshot};
 pub use query::{SearchFilter, SearchQuery, SortOrder, normalize_query};
+pub use search_session::{SearchSession, SearchSessionMode};
 
 /// Commands sent to the background worker for hot-plug drive management.
 #[allow(dead_code)]
@@ -312,13 +314,39 @@ impl SearchEngine {
 
     /// Search across all indexed drives with a structured query.
     pub fn search_query(&self, query: &SearchQuery) -> Vec<EsSearchResult> {
+        self.search_query_inner(query, None)
+    }
+
+    /// Search across all indexed drives while observing cancellation.
+    pub fn search_query_with_cancel(
+        &self,
+        query: &SearchQuery,
+        cancel: &AtomicBool,
+    ) -> Vec<EsSearchResult> {
+        self.search_query_inner(query, Some(cancel))
+    }
+
+    fn search_query_inner(
+        &self,
+        query: &SearchQuery,
+        cancel: Option<&AtomicBool>,
+    ) -> Vec<EsSearchResult> {
         let start = Instant::now();
         let normalized = normalize_query(&query.pattern);
 
         let raw_results = match self.inner.read() {
-            Ok(mgr) => mgr.search(&normalized, query.limit.saturating_mul(2)),
+            Ok(mgr) => match cancel {
+                Some(token) => {
+                    mgr.search_with_cancel(&normalized, query.limit.saturating_mul(2), token)
+                }
+                None => mgr.search(&normalized, query.limit.saturating_mul(2)),
+            },
             Err(_) => Vec::new(),
         };
+
+        if cancel.is_some_and(|token| token.load(Ordering::Relaxed)) {
+            return Vec::new();
+        }
 
         // Apply filters
         let mut results: Vec<EsSearchResult> = if query.filter.is_empty() {
@@ -328,7 +356,9 @@ impl SearchEngine {
                 .into_iter()
                 .filter(|r| {
                     let flags = if r.is_directory { 0x10 } else { 0 };
-                    query.filter.matches(&r.path, &r.name, r.is_directory, flags)
+                    query
+                        .filter
+                        .matches(&r.path, &r.name, r.is_directory, flags)
                 })
                 .collect()
         };
@@ -346,18 +376,10 @@ impl SearchEngine {
                 });
             }
             SortOrder::Name => {
-                results.sort_unstable_by(|a, b| {
-                    a.name
-                        .to_lowercase()
-                        .cmp(&b.name.to_lowercase())
-                });
+                results.sort_unstable_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
             }
             SortOrder::Path => {
-                results.sort_unstable_by(|a, b| {
-                    a.path
-                        .to_lowercase()
-                        .cmp(&b.path.to_lowercase())
-                });
+                results.sort_unstable_by(|a, b| a.path.to_lowercase().cmp(&b.path.to_lowercase()));
             }
         }
 
@@ -371,6 +393,59 @@ impl SearchEngine {
         self.search_query(&SearchQuery::new(query, limit))
     }
 
+    /// Simple search that can stop when superseded by newer input.
+    pub fn search_with_cancel(
+        &self,
+        query: &str,
+        limit: usize,
+        cancel: &AtomicBool,
+    ) -> Vec<EsSearchResult> {
+        self.search_query_with_cancel(&SearchQuery::new(query, limit), cancel)
+    }
+
+    /// Search with a per-input-session candidate cache.
+    pub fn search_with_session(
+        &self,
+        session: &mut SearchSession,
+        query: &str,
+        limit: usize,
+    ) -> Vec<EsSearchResult> {
+        let cancel = AtomicBool::new(false);
+        self.search_with_session_and_cancel(session, query, limit, &cancel)
+    }
+
+    /// Search with a candidate cache while observing cancellation.
+    pub fn search_with_session_and_cancel(
+        &self,
+        session: &mut SearchSession,
+        query: &str,
+        limit: usize,
+        cancel: &AtomicBool,
+    ) -> Vec<EsSearchResult> {
+        let start = Instant::now();
+        let normalized = normalize_query(query);
+        let mut results = match self.inner.read() {
+            Ok(manager) => session.search(&manager, &normalized, limit.saturating_mul(2), cancel),
+            Err(_) => Vec::new(),
+        };
+
+        if cancel.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
+
+        results.sort_unstable_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| path_depth(&left.path).cmp(&path_depth(&right.path)))
+                .then_with(|| left.path.len().cmp(&right.path.len()))
+                .then_with(|| left.path.to_lowercase().cmp(&right.path.to_lowercase()))
+        });
+        results.truncate(limit);
+        self.metrics.record_search(start.elapsed());
+        results
+    }
+
     /// Enumerate a directory path. Thread-safe (acquires read lock).
     pub fn enumerate(
         &self,
@@ -381,6 +456,24 @@ impl SearchEngine {
     ) -> Result<Vec<EsSearchResult>, String> {
         match self.inner.read() {
             Ok(mgr) => mgr.enumerate(path, query, recursive, limit),
+            Err(_) => Ok(Vec::new()),
+        }
+    }
+
+    /// Enumerate a directory path while observing cancellation.
+    pub fn enumerate_with_cancel(
+        &self,
+        path: &str,
+        query: &str,
+        recursive: bool,
+        limit: usize,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<EsSearchResult>, String> {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(Vec::new());
+        }
+        match self.inner.read() {
+            Ok(mgr) => mgr.enumerate_with_cancel(path, query, recursive, limit, cancel),
             Err(_) => Ok(Vec::new()),
         }
     }

@@ -2,6 +2,44 @@
 
 ## Progress
 
+### Search Responsiveness Work
+
+- `Router` now owns one persistent background-query worker instead of spawning
+  one thread per debounced query.
+- Cancellation now propagates through `Plugin::query_with_cancel`,
+  `FileSearchPlugin`, `SearchEngine`, `DriveManager`, and `EsIndex`. Long index
+  scans check for obsolete queries every 1024 records.
+- Input debounce is 100 ms. Search/icon progress animation starts only after the
+  debounced background query begins and runs at roughly 30 FPS instead of 60 FPS.
+- Icon extraction uses two long-lived workers instead of one OS thread per icon;
+  stale icon completions populate the cache without repainting the current view.
+- Periodic Program and Bookmark index refreshes run in background threads, so a
+  timed refresh cannot block the Win32 input handler.
+- Added core tests for pre-cancelled index searches and latest-query-wins worker
+  behavior.
+
+#### Candidate Search Session
+
+- A 3+ character cold query still scans all logical MFT records, but now collects
+  every matching logical record ID separately from the bounded Top-N results.
+- Strict query extensions filter the previous complete candidate set. Backspace
+  can reuse one of four retained prefix snapshots; middle edits and unrelated
+  queries start a new cold-search branch.
+- Candidate snapshots are grouped by drive and tagged with `DriveManager`
+  generation. Drive install/removal and non-empty USN batches invalidate them
+  before logical IDs can be reused against changed index state.
+- Retained candidate IDs are capped at 32 MiB across at most four snapshots.
+  When a cold scan exceeds the budget, results remain valid but the incomplete
+  candidate set is explicitly marked uncacheable.
+- Empty/1-2 character queries, path-search mode, window hide, and explicit
+  router session reset release the cache. Resetting the file plugin never waits
+  for an obsolete background scan on the UI thread.
+- ASCII filename matching now compares bytes case-insensitively without a
+  per-record lowercase allocation; Unicode keeps the existing folding fallback.
+
+This preserves substring-search semantics without restoring the removed
+~600 MiB trigram postings index.
+
 ### Completed Extractions
 
 | Module | Extracted From | Responsibility |

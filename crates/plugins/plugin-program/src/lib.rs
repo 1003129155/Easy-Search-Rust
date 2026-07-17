@@ -14,7 +14,9 @@ mod scanner;
 mod settings;
 mod uwp;
 
-use easysearch_core::{Action, ContextAction, ContextData, Plugin, PluginResult, SettingControl, SettingItem};
+use easysearch_core::{
+    Action, ContextAction, ContextData, Plugin, PluginResult, SettingControl, SettingItem,
+};
 pub use settings::ProgramSettings;
 
 use cache::ProgramCache;
@@ -83,16 +85,7 @@ impl ProgramPlugin {
 
     /// Full index rebuild: scan Win32 + UWP, apply filters, save cache.
     fn rebuild_index(&self) {
-        let mut entries = scan_start_menu();
-        entries.extend(scan_uwp_apps());
-
-        if self.settings.hide_uninstallers {
-            entries.retain(|e| !is_uninstaller(&e.name));
-        }
-
-        entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        entries.dedup_by(|a, b| a.name.to_lowercase() == b.name.to_lowercase());
-
+        let entries = build_program_index(&self.settings);
         ProgramCache::save(&entries);
 
         if let Ok(mut lock) = self.programs.lock() {
@@ -106,16 +99,42 @@ impl ProgramPlugin {
 
     /// Check if it's time for a periodic rebuild (every 30 minutes).
     fn maybe_refresh(&self) {
-        let should_rebuild = self
-            .last_rebuild
-            .lock()
-            .map(|ts| ts.elapsed() > Duration::from_secs(30 * 60))
-            .unwrap_or(false);
+        let should_rebuild = self.last_rebuild.lock().is_ok_and(|mut ts| {
+            if ts.elapsed() <= Duration::from_secs(30 * 60) {
+                return false;
+            }
+            *ts = Instant::now();
+            true
+        });
 
         if should_rebuild {
-            self.rebuild_index();
+            let programs = Arc::clone(&self.programs);
+            let settings = self.settings.clone();
+            std::thread::Builder::new()
+                .name("program-index-refresh".into())
+                .spawn(move || {
+                    let entries = build_program_index(&settings);
+                    ProgramCache::save(&entries);
+                    if let Ok(mut current) = programs.lock() {
+                        *current = entries;
+                    }
+                })
+                .ok();
         }
     }
+}
+
+fn build_program_index(settings: &ProgramSettings) -> Vec<ProgramEntry> {
+    let mut entries = scan_start_menu();
+    entries.extend(scan_uwp_apps());
+
+    if settings.hide_uninstallers {
+        entries.retain(|entry| !is_uninstaller(&entry.name));
+    }
+
+    entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    entries.dedup_by(|a, b| a.name.to_lowercase() == b.name.to_lowercase());
+    entries
 }
 
 impl Default for ProgramPlugin {
@@ -151,11 +170,7 @@ impl Plugin for ProgramPlugin {
             .iter()
             .filter_map(|p| {
                 let score = fuzzy_score(&q, &p.name.to_lowercase());
-                if score > 0 {
-                    Some((score, p))
-                } else {
-                    None
-                }
+                if score > 0 { Some((score, p)) } else { None }
             })
             .collect();
 
@@ -240,7 +255,10 @@ impl Plugin for ProgramPlugin {
                 ),
             ],
             _ => [
-                ("Maximum results", "How many programs to show at most in search results"),
+                (
+                    "Maximum results",
+                    "How many programs to show at most in search results",
+                ),
                 (
                     "Hide uninstallers",
                     "Filter out shortcuts whose names contain Uninstall",

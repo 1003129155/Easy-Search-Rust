@@ -32,9 +32,7 @@ use super::layout;
 #[cfg(windows)]
 use super::messages::*;
 #[cfg(windows)]
-use super::plugin_bridge::{
-    action_to_history_key_static, build_plugin_router,
-};
+use super::plugin_bridge::{action_to_history_key_static, build_plugin_router};
 #[cfg(windows)]
 use super::renderer::Renderer;
 #[cfg(windows)]
@@ -408,7 +406,8 @@ pub(super) fn show_native_context_menu_safe() {
                         .map(|data| (app.hwnd, data.file_path.clone(), data.is_directory, point))
                 }),
         }
-    }).flatten();
+    })
+    .flatten();
 
     let Some((hwnd, path, _is_dir, point)) = request else {
         return;
@@ -501,13 +500,13 @@ unsafe extern "system" fn wnd_proc(
                     let ctrl_held = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
                     if !ctrl_held {
                         app_state::with_app_mut(|app| {
-                                    if app.pending_ime_char_suppression > 0 {
-                                        app.pending_ime_char_suppression -= 1;
-                                        return;
-                                    }
-                                    app.input.insert_char(ch);
-                                    on_input_changed(app);
-                                                        });
+                            if app.pending_ime_char_suppression > 0 {
+                                app.pending_ime_char_suppression -= 1;
+                                return;
+                            }
+                            app.input.insert_char(ch);
+                            on_input_changed(app);
+                        });
                         do_render();
                     }
                 }
@@ -565,12 +564,12 @@ unsafe extern "system" fn wnd_proc(
                             );
                             let text = String::from_utf16_lossy(&buf);
                             app_state::with_app_mut(|app| {
-                                        app.pending_ime_char_suppression = app
-                                            .pending_ime_char_suppression
-                                            .saturating_add(text.chars().count());
-                                        app.input.insert_str(&text);
-                                        on_input_changed(app);
-                                                                });
+                                app.pending_ime_char_suppression = app
+                                    .pending_ime_char_suppression
+                                    .saturating_add(text.chars().count());
+                                app.input.insert_str(&text);
+                                on_input_changed(app);
+                            });
                             do_render();
                         }
                         let _ = ImmReleaseContext(hwnd, himc);
@@ -589,8 +588,8 @@ unsafe extern "system" fn wnd_proc(
             // expected WM_CHAR messages will never arrive.  Without this
             // reset the counter stays >0 and blocks all subsequent typing.
             app_state::with_app_mut(|app| {
-                        app.pending_ime_char_suppression = 0;
-                                });
+                app.pending_ime_char_suppression = 0;
+            });
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
 
@@ -620,23 +619,24 @@ unsafe extern "system" fn wnd_proc(
                         }
                         // Mark visible=false when the borrow becomes available
                         app_state::with_app_mut(|app| {
-                                    if app.visible {
-                                        app.visible = false;
-                                        app.input.clear();
-                                        app.items.clear();
-                                        app.result_items.clear();
-                                        app.context_items.clear();
-                                        app.plugin_items.clear();
-                                        app.deferred_query = None;
-                                        app.selected_index = 0;
-                                        app.result_selected_index = 0;
-                                        app.context_selected_index = 0;
-                                        app.context_source_index = None;
-                                        app.view_mode = ViewMode::Results;
-                                        app.pending_ime_char_suppression = 0;
-                                        app.input_focused = true;
-                                    }
-                                                        });
+                            if app.visible {
+                                app.visible = false;
+                                app.input.clear();
+                                app.items.clear();
+                                app.result_items.clear();
+                                app.context_items.clear();
+                                app.plugin_items.clear();
+                                app.deferred_query = None;
+                                app.plugin_router.reset_search_sessions();
+                                app.selected_index = 0;
+                                app.result_selected_index = 0;
+                                app.context_selected_index = 0;
+                                app.context_source_index = None;
+                                app.view_mode = ViewMode::Results;
+                                app.pending_ime_char_suppression = 0;
+                                app.input_focused = true;
+                            }
+                        });
                     }
                 }
             }
@@ -655,8 +655,8 @@ unsafe extern "system" fn wnd_proc(
             let width = (lparam.0 as u32) & 0xFFFF;
             let height = ((lparam.0 as u32) >> 16) & 0xFFFF;
             app_state::with_app_mut(|app| {
-                        app.renderer.resize(width, height);
-                                });
+                app.renderer.resize(width, height);
+            });
             LRESULT(0)
         }
 
@@ -667,8 +667,8 @@ unsafe extern "system" fn wnd_proc(
                     let _ = KillTimer(Some(hwnd), SEARCH_DEBOUNCE_TIMER_ID);
                 }
                 app_state::with_app_mut(|app| {
-                            run_debounced_search(app);
-                                        });
+                    run_debounced_search(app);
+                });
                 do_render();
             } else if wparam.0 == BUSY_ANIM_TIMER_ID {
                 let keep_running = app_state::with_app_mut(|app| {
@@ -684,10 +684,9 @@ unsafe extern "system" fn wnd_proc(
                 do_render();
             } else if wparam.0 == DEFERRED_POLL_TIMER_ID {
                 // Poll for background plugin results (FileSearch)
-                let should_stop = app_state::with_app_mut(|app| {
-                    super::search_flow::poll_deferred_results(app)
-                })
-                .unwrap_or(true);
+                let should_stop =
+                    app_state::with_app_mut(|app| super::search_flow::poll_deferred_results(app))
+                        .unwrap_or(true);
 
                 if should_stop {
                     app_state::with_app_mut(|app| {
@@ -725,12 +724,12 @@ unsafe extern "system" fn wnd_proc(
             // Reconstruct the Box to take ownership (and free on drop)
             let info = unsafe { Box::from_raw(ptr) };
             app_state::with_app_mut(|app| {
-                        // Only accept if seq matches (not stale)
-                        if app.preview_seq == seq && app.view_mode == ViewMode::ContextActions {
-                            app.preview = Some(*info);
-                            resize_for_results(app);
-                        }
-                                });
+                // Only accept if seq matches (not stale)
+                if app.preview_seq == seq && app.view_mode == ViewMode::ContextActions {
+                    app.preview = Some(*info);
+                    resize_for_results(app);
+                }
+            });
             do_render();
             LRESULT(0)
         }
@@ -739,22 +738,26 @@ unsafe extern "system" fn wnd_proc(
         m if m == WM_ICON_READY => {
             let ptr = lparam.0 as *mut IconReadyPayload;
             let payload = unsafe { Box::from_raw(ptr) };
-            app_state::with_app_mut(|app| {
-                        if let Some(rt) = app.renderer.render_target.clone() {
-                            app.icon_cache
-                                .finish_load(payload.request, payload.pixels, &rt);
-                        }
-                                });
-            do_render();
+            let should_render = app_state::with_app_mut(|app| {
+                if let Some(rt) = app.renderer.render_target.clone() {
+                    app.icon_cache
+                        .finish_load(payload.request, payload.pixels, &rt);
+                }
+                payload.seq_id == app.current_search_seq && app.visible
+            })
+            .unwrap_or(false);
+            if should_render {
+                do_render();
+            }
             LRESULT(0)
         }
 
         m if m == WM_INDEX_READY => {
             app_state::with_app_mut(|app| {
-                        app.index_ready = true;
-                        app.index_status.clear();
-                        app.index_error = None;
-                                });
+                app.index_ready = true;
+                app.index_status.clear();
+                app.index_error = None;
+            });
             do_render();
             LRESULT(0)
         }
@@ -764,59 +767,54 @@ unsafe extern "system" fn wnd_proc(
             let evt_type = wparam.0;
             let data_ptr = lparam.0;
 
-            app_state::with_app_mut(|app| {
-                        match evt_type {
-                            ENGINE_EVT_DRIVE_INDEXING => {
-                                let msg =
-                                    unsafe { Box::from_raw(data_ptr as *mut EngineEventPayload) };
-                                app.index_status = match *msg {
-                                    EngineEventPayload::DriveIndexing { drive } => app
-                                        .i18n
-                                        .get("search_status_indexing_drive")
-                                        .replace("{drive}", &drive.to_string()),
-                                    _ => String::new(),
-                                };
-                                app.index_error = None;
-                            }
-                            ENGINE_EVT_DRIVE_READY => {
-                                let msg =
-                                    unsafe { Box::from_raw(data_ptr as *mut EngineEventPayload) };
-                                app.index_status = match *msg {
-                                    EngineEventPayload::DriveReady {
-                                        drive,
-                                        records,
-                                        seconds,
-                                    } => app
-                                        .i18n
-                                        .get("search_status_drive_ready")
-                                        .replace("{drive}", &drive.to_string())
-                                        .replace("{records}", &records.to_string())
-                                        .replace("{seconds}", &format!("{seconds:.1}")),
-                                    _ => String::new(),
-                                };
-                            }
-                            ENGINE_EVT_DRIVE_ERROR => {
-                                let msg =
-                                    unsafe { Box::from_raw(data_ptr as *mut EngineEventPayload) };
-                                let localized = match *msg {
-                                    EngineEventPayload::DriveError { drive, error } => app
-                                        .i18n
-                                        .get("search_status_drive_error")
-                                        .replace("{drive}", &drive.to_string())
-                                        .replace("{error}", &error),
-                                    _ => String::new(),
-                                };
-                                app.index_error = Some(localized.clone());
-                                app.index_status = localized;
-                            }
-                            ENGINE_EVT_ALL_READY => {
-                                app.index_ready = true;
-                                app.index_status.clear();
-                                app.index_error = None;
-                            }
-                            _ => {}
-                        }
-                                });
+            app_state::with_app_mut(|app| match evt_type {
+                ENGINE_EVT_DRIVE_INDEXING => {
+                    let msg = unsafe { Box::from_raw(data_ptr as *mut EngineEventPayload) };
+                    app.index_status = match *msg {
+                        EngineEventPayload::DriveIndexing { drive } => app
+                            .i18n
+                            .get("search_status_indexing_drive")
+                            .replace("{drive}", &drive.to_string()),
+                        _ => String::new(),
+                    };
+                    app.index_error = None;
+                }
+                ENGINE_EVT_DRIVE_READY => {
+                    let msg = unsafe { Box::from_raw(data_ptr as *mut EngineEventPayload) };
+                    app.index_status = match *msg {
+                        EngineEventPayload::DriveReady {
+                            drive,
+                            records,
+                            seconds,
+                        } => app
+                            .i18n
+                            .get("search_status_drive_ready")
+                            .replace("{drive}", &drive.to_string())
+                            .replace("{records}", &records.to_string())
+                            .replace("{seconds}", &format!("{seconds:.1}")),
+                        _ => String::new(),
+                    };
+                }
+                ENGINE_EVT_DRIVE_ERROR => {
+                    let msg = unsafe { Box::from_raw(data_ptr as *mut EngineEventPayload) };
+                    let localized = match *msg {
+                        EngineEventPayload::DriveError { drive, error } => app
+                            .i18n
+                            .get("search_status_drive_error")
+                            .replace("{drive}", &drive.to_string())
+                            .replace("{error}", &error),
+                        _ => String::new(),
+                    };
+                    app.index_error = Some(localized.clone());
+                    app.index_status = localized;
+                }
+                ENGINE_EVT_ALL_READY => {
+                    app.index_ready = true;
+                    app.index_status.clear();
+                    app.index_error = None;
+                }
+                _ => {}
+            });
             do_render();
             LRESULT(0)
         }
@@ -834,36 +832,36 @@ unsafe extern "system" fn wnd_proc(
             // Recalculate window size using the new DPI (GetDpiForWindow will
             // already reflect the new DPI when WM_DPICHANGED is received).
             app_state::with_app_mut(|app| {
-                        let has_preview =
-                            app.preview.is_some() && app.view_mode == ViewMode::ContextActions;
-                        let new_width = layout::window_width_scaled(app.hwnd);
-                        let new_height = layout::window_height_with_preview_scaled(
-                            app.items.len(),
-                            has_preview,
-                            app.hwnd,
-                        );
+                let has_preview =
+                    app.preview.is_some() && app.view_mode == ViewMode::ContextActions;
+                let new_width = layout::window_width_scaled(app.hwnd);
+                let new_height = layout::window_height_with_preview_scaled(
+                    app.items.len(),
+                    has_preview,
+                    app.hwnd,
+                );
 
-                        // Use suggested position from Windows, but our own calculated size
-                        unsafe {
-                            let _ = SetWindowPos(
-                                app.hwnd,
-                                None,
-                                suggested_rect.left,
-                                suggested_rect.top,
-                                new_width,
-                                new_height,
-                                SWP_NOZORDER | SWP_NOACTIVATE,
-                            );
-                        }
+                // Use suggested position from Windows, but our own calculated size
+                unsafe {
+                    let _ = SetWindowPos(
+                        app.hwnd,
+                        None,
+                        suggested_rect.left,
+                        suggested_rect.top,
+                        new_width,
+                        new_height,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
 
-                        app.renderer.resize(new_width as u32, new_height as u32);
-                        crate::log!(
-                            "WM_DPICHANGED: dpi_scale={:.2}, resized to {}x{}",
-                            layout::dpi_scale(app.hwnd),
-                            new_width,
-                            new_height
-                        );
-                                });
+                app.renderer.resize(new_width as u32, new_height as u32);
+                crate::log!(
+                    "WM_DPICHANGED: dpi_scale={:.2}, resized to {}x{}",
+                    layout::dpi_scale(app.hwnd),
+                    new_width,
+                    new_height
+                );
+            });
 
             do_render();
             LRESULT(0)
@@ -874,8 +872,8 @@ unsafe extern "system" fn wnd_proc(
             // Windows broadcasts WM_SETTINGCHANGE when system theme changes.
             // Re-detect theme and update renderer.
             app_state::with_app_mut(|app| {
-                        app.renderer.theme = crate::theme::Theme::system();
-                                });
+                app.renderer.theme = crate::theme::Theme::system();
+            });
             do_render();
             LRESULT(0)
         }
@@ -960,26 +958,34 @@ fn handle_keydown(wparam: WPARAM) {
         let focused = app.input_focused;
         (vm, input_empty, is_hint, focused)
     })
-    .map(|(vm, empty, hint, focused)| super::key_command::decode_key_command(wparam, vm, hint, empty, focused))
+    .map(|(vm, empty, hint, focused)| {
+        super::key_command::decode_key_command(wparam, vm, hint, empty, focused)
+    })
     .unwrap_or(super::key_command::KeyCommand::None);
 
-    let deferred = app_state::with_app_mut(|app| {
-        super::key_command::execute_key_command(app, cmd)
-    })
-    .unwrap_or(super::key_command::DeferredAction::None);
+    let deferred = app_state::with_app_mut(|app| super::key_command::execute_key_command(app, cmd))
+        .unwrap_or(super::key_command::DeferredAction::None);
 
     // Execute deferred actions AFTER borrow is released (Win32 calls can re-enter)
     match deferred {
         super::key_command::DeferredAction::Hide => hide_window(),
         super::key_command::DeferredAction::Execute => super::execution::execute_selected_safe(),
-        super::key_command::DeferredAction::OpenFolder => super::execution::open_folder_or_containing_safe(),
+        super::key_command::DeferredAction::OpenFolder => {
+            super::execution::open_folder_or_containing_safe()
+        }
         super::key_command::DeferredAction::OpenContext => {
-            app_state::with_app_mut(|app| { let _ = open_context_actions(app); });
+            app_state::with_app_mut(|app| {
+                let _ = open_context_actions(app);
+            });
         }
         super::key_command::DeferredAction::CloseContext => {
-            app_state::with_app_mut(|app| { let _ = close_context_actions(app); });
+            app_state::with_app_mut(|app| {
+                let _ = close_context_actions(app);
+            });
         }
-        super::key_command::DeferredAction::ShowNativeContextMenu => show_native_context_menu_safe(),
+        super::key_command::DeferredAction::ShowNativeContextMenu => {
+            show_native_context_menu_safe()
+        }
         super::key_command::DeferredAction::None => {}
     }
 

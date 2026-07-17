@@ -117,10 +117,7 @@ impl SearchFilter {
 
         // Path prefix
         if let Some(ref prefix) = self.path_prefix {
-            if !path
-                .to_lowercase()
-                .starts_with(&prefix.to_lowercase())
-            {
+            if !path.to_lowercase().starts_with(&prefix.to_lowercase()) {
                 return false;
             }
         }
@@ -151,8 +148,7 @@ impl SearchFilter {
     pub fn no_hidden_system() -> Self {
         Self {
             exclude_flags: Some(
-                easysearch_core::record::flags::HIDDEN
-                    | easysearch_core::record::flags::SYSTEM,
+                easysearch_core::record::flags::HIDDEN | easysearch_core::record::flags::SYSTEM,
             ),
             ..Default::default()
         }
@@ -209,13 +205,13 @@ pub fn normalize_query(raw: &str) -> String {
     // Strip leading/trailing wildcards
     let s = trimmed.trim_start_matches('*').trim_end_matches('*');
 
-    // If there are internal wildcards, take the longest non-wildcard segment
+    // If there are internal wildcards, keep the first concrete segment. This
+    // preserves the user's left-to-right narrowing intent deterministically.
     if s.contains('*') || s.contains('?') {
-        let parts: Vec<&str> = s.split(&['*', '?'][..]).filter(|p| !p.is_empty()).collect();
-        return parts
-            .iter()
-            .max_by_key(|p| p.len())
-            .unwrap_or(&"")
+        return s
+            .split(&['*', '?'][..])
+            .find(|part| !part.is_empty())
+            .unwrap_or("")
             .to_string();
     }
 

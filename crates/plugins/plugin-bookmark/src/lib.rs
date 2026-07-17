@@ -64,20 +64,26 @@ impl BookmarkPlugin {
     }
 
     fn maybe_refresh(&self) {
-        let should_refresh = self
-            .last_refresh
-            .lock()
-            .map(|ts| ts.elapsed() > REFRESH_INTERVAL)
-            .unwrap_or(false);
+        let should_refresh = self.last_refresh.lock().is_ok_and(|mut ts| {
+            if ts.elapsed() <= REFRESH_INTERVAL {
+                return false;
+            }
+            *ts = Instant::now();
+            true
+        });
 
         if should_refresh {
-            let new_bookmarks = load_all_bookmarks(&self.settings);
-            if let Ok(mut lock) = self.bookmarks.lock() {
-                *lock = new_bookmarks;
-            }
-            if let Ok(mut ts) = self.last_refresh.lock() {
-                *ts = Instant::now();
-            }
+            let bookmarks = Arc::clone(&self.bookmarks);
+            let settings = self.settings.clone();
+            std::thread::Builder::new()
+                .name("bookmark-refresh".into())
+                .spawn(move || {
+                    let new_bookmarks = load_all_bookmarks(&settings);
+                    if let Ok(mut current) = bookmarks.lock() {
+                        *current = new_bookmarks;
+                    }
+                })
+                .ok();
         }
     }
 }
@@ -162,10 +168,7 @@ impl Plugin for BookmarkPlugin {
     fn description_for_locale(&self, locale: &str) -> String {
         match locale_prefix(locale) {
             "zh" => "搜索 Chrome、Edge、Brave 和 Firefox 的浏览器书签".to_string(),
-            "ja" => {
-                "Chrome、Edge、Brave、Firefox のブラウザーブックマークを検索します"
-                    .to_string()
-            }
+            "ja" => "Chrome、Edge、Brave、Firefox のブラウザーブックマークを検索します".to_string(),
             _ => self.description().to_string(),
         }
     }

@@ -31,8 +31,8 @@ pub(super) fn toggle_visibility() {
     crate::log!("toggle_visibility called");
 
     // Read current visibility state without holding borrow during Win32 calls
-    let (is_visible, hwnd) = app_state::with_app_ref(|app| (app.visible, app.hwnd))
-        .unwrap_or((false, HWND::default()));
+    let (is_visible, hwnd) =
+        app_state::with_app_ref(|app| (app.visible, app.hwnd)).unwrap_or((false, HWND::default()));
 
     if is_visible {
         crate::log!("  -> hiding window");
@@ -56,11 +56,8 @@ pub(super) fn show_window_safe(hwnd: HWND) {
     // resulting item count (used to size the window below).
     let item_count = app_state::with_app_mut(|app| {
         if app.input.text().trim().is_empty() {
-            app.result_items = build_home_screen(
-                &app.history,
-                &app.plugin_router,
-                app.i18n.current_locale(),
-            );
+            app.result_items =
+                build_home_screen(&app.history, &app.plugin_router, app.i18n.current_locale());
             app.plugin_items.clear();
             app.result_selected_index = 0;
             super::window::sync_active_items(app);
@@ -197,6 +194,7 @@ pub(super) fn hide_window() {
         app.context_items.clear();
         app.plugin_items.clear();
         app.deferred_query = None;
+        app.plugin_router.reset_search_sessions();
         app.preview = None;
         app.preview_seq += 1;
         app.selected_index = 0;
@@ -304,6 +302,7 @@ pub(super) fn hide_window_inner(app: &mut super::app_state::AppState) {
     app.context_items.clear();
     app.plugin_items.clear();
     app.deferred_query = None;
+    app.plugin_router.reset_search_sessions();
     app.preview = None;
     app.preview_seq += 1;
     app.selected_index = 0;

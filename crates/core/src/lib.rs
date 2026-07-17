@@ -25,6 +25,7 @@ mod audit_tests;
 
 pub use builder::EsIndexBuilder;
 pub use error::{EsError, Result};
+pub use index::EsCandidateSearch;
 pub use index::{EsIndex, FileRefEntry, FileRefMap};
 pub use plugin::{
     Action, CancelToken, ContextAction, ContextData, Plugin, PluginResult, PluginRouterInfo,
