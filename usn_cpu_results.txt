@@ -1,0 +1,9 @@
+[2026-07-17 23:11:48] label=before window=29.88s cpu=22.453s avg=75.16pct bursts=40 drives=C load=200/500ms
+[2026-07-17 23:15:37] label=after window=29.83s cpu=23.172s avg=77.68pct bursts=39 drives=C load=200/500ms
+[2026-07-17 23:21:16] label=full_ow mask=FULL loadType=overwrite window=30.02s cpu=-0.391s avg=-1.30pct bursts=44 drives=C files=200/500ms
+[2026-07-17 23:24:15] label=full_ow mask=FULL loadType=overwrite window=29.88s cpu=4.234s avg=14.17pct bursts=46 drives=C files=200/500ms
+[2026-07-17 23:26:32] label=full_ow mask=FULL loadType=overwrite window=30.00s cpu=4.500s avg=15.00pct bursts=46 drives=C files=200/500ms
+[2026-07-17 23:27:54] label=narrow_ow mask=NARROW loadType=overwrite window=30.12s cpu=4.234s avg=14.06pct bursts=46 drives=C files=200/500ms
+[2026-07-17 23:30:05] label=narrow_ow mask=NARROW loadType=overwrite window=30.07s cpu=4.281s avg=14.24pct bursts=46 drives=C files=200/500ms
+[2026-07-17 23:31:30] label=full_ow_hi mask=FULL loadType=overwrite window=30.08s cpu=18.766s avg=62.38pct bursts=43 drives=C files=1000/50ms
+[2026-07-17 23:38:45] label=narrow_ow_hi mask=NARROW loadType=overwrite window=29.85s cpu=17.500s avg=58.63pct bursts=43 drives=C files=1000/50ms

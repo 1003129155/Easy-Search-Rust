@@ -60,6 +60,8 @@ impl FileSearchPlugin {
                 .session
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // ② 搜索开始前：检查在等锁期间 UI 线程是否发过 reset 请求。
+            //    swap → false 意味着"我已经处理了这次请求"。
             if self.reset_requested.swap(false, Ordering::AcqRel) {
                 session.reset();
             }
@@ -74,10 +76,14 @@ impl FileSearchPlugin {
                     .engine
                     .search_with_session(&mut session, q, MAX_FILE_RESULTS),
             };
+            // ② 搜索结束后、drop 锁之前：处理搜索过程中到达的 reset 请求。
+            //    竞态窗口：UI 线程在"搜索开始前 swap" 和这里之间调用了 reset_search_session，
+            //    try_lock 失败，flag 被置为 true，需要在这里清掉并 reset。
             if self.reset_requested.swap(false, Ordering::AcqRel) {
                 session.reset();
             }
             drop(session);
+            // ③ 见 finish_pending_reset 注释。
             self.finish_pending_reset();
             results
         };
@@ -86,6 +92,12 @@ impl FileSearchPlugin {
     }
 
     fn finish_pending_reset(&self) {
+        // ③ 封堵最后一个极短竞态窗口：
+        //    时序：worker 执行"②搜索结束后 swap → false"（无 reset 请求）
+        //          → UI 线程此时调用 reset_search_session，try_lock 仍失败（锁未释放）→ flag = true
+        //          → worker drop(session) 释放锁
+        //          → 来到这里：swap → true，重新获锁并 reset。
+        //    如果没有这一步，这个窗口里的 reset 请求会被永久丢失。
         if self.reset_requested.swap(false, Ordering::AcqRel) {
             let mut session = self
                 .session
@@ -119,11 +131,17 @@ impl Plugin for FileSearchPlugin {
     }
 
     fn reset_search_session(&self) {
+        // ① 先无条件标记 reset 请求。
+        //    如果 try_lock 失败（background worker 正持锁搜索中），reset flag 会保留，
+        //    等 worker 在 query_inner 内部或 finish_pending_reset 里检测到后执行实际 reset。
         self.reset_requested.store(true, Ordering::Release);
         if let Ok(mut session) = self.session.try_lock() {
+            // try_lock 成功：锁空闲，可以立即 reset，顺便清掉 flag 避免重复 reset。
             session.reset();
             self.reset_requested.store(false, Ordering::Release);
         }
+        // try_lock 失败时刻意不阻塞：UI 线程不能等 MFT 搜索完成。
+        // flag 留给 worker 的 ② 或 ③ 处理。
     }
 
     fn name(&self) -> &str {

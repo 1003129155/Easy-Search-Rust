@@ -255,10 +255,38 @@ pub fn read_usn_journal(
     let mut all_records = Vec::new();
     let mut current_usn = start_usn.raw();
 
+    // Only subscribe to the reasons that affect the *name index* (create,
+    // delete, rename). Data writes (`DATA_OVERWRITE`/`DATA_EXTEND`), metadata
+    // changes (`BASIC_INFO_CHANGE`), and close records don't change any
+    // filename/parent we track, yet on a busy volume they dominate the journal
+    // stream by orders of magnitude. Filtering at the kernel boundary means we
+    // never copy/UTF-16-decode/aggregate those records at all, while NTFS still
+    // advances the returned `next_usn` past them so nothing is missed.
+    //
+    // Values from `winioctl.h` `USN_REASON_*`:
+    const USN_REASON_FILE_CREATE: u32 = 0x0000_0100;
+    const USN_REASON_FILE_DELETE: u32 = 0x0000_0200;
+    const USN_REASON_RENAME_OLD_NAME: u32 = 0x0000_1000;
+    const USN_REASON_RENAME_NEW_NAME: u32 = 0x0000_2000;
+    const NAME_INDEX_REASON_MASK: u32 = USN_REASON_FILE_CREATE
+        | USN_REASON_FILE_DELETE
+        | USN_REASON_RENAME_OLD_NAME
+        | USN_REASON_RENAME_NEW_NAME;
+
+    // Benchmark escape hatch: `EASYSEARCH_USN_FULL_MASK=1` restores the old
+    // subscribe-to-everything behavior so the CPU cost of the narrowed mask can
+    // be measured against the baseline with a single binary. Production leaves
+    // this unset and uses the narrowed mask.
+    let reason_mask = if std::env::var_os("EASYSEARCH_USN_FULL_MASK").is_some() {
+        0xFFFF_FFFF_u32
+    } else {
+        NAME_INDEX_REASON_MASK
+    };
+
     loop {
         let read_data = ReadUsnJournalDataV0 {
             start_usn: current_usn,
-            reason_mask: 0xFFFF_FFFF,
+            reason_mask,
             return_only_on_close: 0,
             timeout: 0,
             bytes_to_wait_for: 0,

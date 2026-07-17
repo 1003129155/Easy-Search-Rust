@@ -904,6 +904,7 @@ dependencies = [
  "easysearch-core",
  "easysearch-mft",
  "easysearch-security",
+ "tempfile",
  "windows 0.62.2",
 ]
 

@@ -1,0 +1,4 @@
+   Compiling easysearch-engine v0.1.0 (C:\Users\10031\Desktop\sousuo\EasySearch\crates\engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.83s
+  Executable unittests src\lib.rs (target\debug\deps\easysearch_engine-46d9883ad1ab1fd8.exe)
+  Executable tests\integration.rs (target\debug\deps\integration-b963d3c36dc9ee91.exe)

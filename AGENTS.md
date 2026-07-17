@@ -55,3 +55,33 @@ Treat these as regressions:
 ## Goal
 
 Keep the architecture moving toward small, obvious boundaries so future humans and AI agents can place code correctly on the first try.
+
+## Testing
+
+### easysearch-engine integration tests
+
+`crates/engine/tests/integration.rs` has two layers:
+
+- **Memory layer** (no admin, fast): fake index + `DriveManager::apply` verify search,
+  filter, and USN delta (create / delete / rename) logic. Runs everywhere.
+- **Real MFT layer** (`#[ignore]`, needs Administrator + real NTFS): starts the real
+  engine, indexes the live C: drive (~2M records), creates/deletes/renames real files,
+  waits for USN polling, and verifies search results.
+
+Run the memory layer:
+
+```bash
+cargo test -p easysearch-engine --test integration
+```
+
+Run the real MFT layer (Administrator shell required):
+
+```bash
+# IMPORTANT: single-threaded. Each test does a full-drive MFT rebuild + USN poll loop.
+# Running them in parallel saturates disk/CPU and makes the USN timing windows flaky
+# (create/delete/rename events can miss the wait window and cause false failures).
+cargo test -p easysearch-engine --test integration -- --ignored --test-threads=1
+```
+
+Each real-MFT test calls `engine.shutdown()` at the end so its background USN poller
+thread exits and does not contend with the next test. Do not remove those calls.

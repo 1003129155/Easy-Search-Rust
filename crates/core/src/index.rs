@@ -715,6 +715,7 @@ impl EsIndex {
             }
             self.scan_delta_inserted(&query_folded, &mut scored);
         } else {
+            let has_renames = !self.delta.renamed.is_empty();
             for (record_idx, record) in self.records.iter().enumerate() {
                 if record_idx % 1024 == 0 && is_cancelled(cancel) {
                     return Vec::new();
@@ -723,15 +724,36 @@ impl EsIndex {
                 if record.is_tombstone() || self.delta.is_deleted(index) {
                     continue;
                 }
-                let start = record.name_offset as usize;
-                let end = start + record.name_len as usize;
-                let name_bytes = match self.names.get(start..end) {
-                    Some(b) => b,
-                    None => continue,
-                };
-                let name = match core::str::from_utf8(name_bytes) {
-                    Ok(s) => s,
-                    Err(_) => continue,
+                // Honour overlay renames: a base record whose name was changed
+                // via USN must match against its new name, not the stale bytes
+                // stored in `self.names`.
+                let name = if has_renames {
+                    match self
+                        .delta
+                        .renamed
+                        .get(&index)
+                        .map(String::as_str)
+                        .or_else(|| {
+                            let start = record.name_offset as usize;
+                            let end = start.saturating_add(record.name_len as usize);
+                            self.names
+                                .get(start..end)
+                                .and_then(|bytes| core::str::from_utf8(bytes).ok())
+                        }) {
+                        Some(name) => name,
+                        None => continue,
+                    }
+                } else {
+                    let start = record.name_offset as usize;
+                    let end = start + record.name_len as usize;
+                    let name_bytes = match self.names.get(start..end) {
+                        Some(b) => b,
+                        None => continue,
+                    };
+                    match core::str::from_utf8(name_bytes) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    }
                 };
                 let is_dir = record.is_directory();
                 if let Some((score, highlight)) = score_name(&query_folded, name, is_dir) {

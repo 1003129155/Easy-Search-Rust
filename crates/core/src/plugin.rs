@@ -262,6 +262,10 @@ fn spawn_background_worker() -> mpsc::Sender<BackgroundRequest> {
                 }
 
                 let mut all_results = Vec::new();
+                // tasks 在单个 worker 内串行执行：当前只有 FileSearchPlugin 标记
+                // needs_background，所以 tasks 始终只有一项，串行无影响。
+                // TODO: 若未来注册多个 background 插件，此处会形成隐性串行瓶颈，
+                //       需改为按插件并行发起（每个插件独立 spawn 或使用线程池）。
                 for (stripped_query, plugin) in request.tasks {
                     if request.cancel.load(Ordering::Relaxed) {
                         break;
