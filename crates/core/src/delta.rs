@@ -13,7 +13,7 @@
 //!
 //! Snapshot compaction folds the overlay back into a fresh base and clears it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// A record created after the base snapshot.
 ///
@@ -46,6 +46,18 @@ pub struct EsDeltaOverlay {
     pub moved: BTreeMap<u32, u32>,
     /// Tombstoned logical indices.
     pub deleted: BTreeSet<u32>,
+    /// O(1) file-reference → logical-index overrides layered above the base
+    /// snapshot's immutable `FileRefMap`.
+    ///
+    /// `Some(idx)` shadows or adds a mapping (a newly inserted record, or a
+    /// reused MFT record number pointing at a new logical index). `None` is a
+    /// tombstone that hides a base mapping (the file was deleted).
+    ///
+    /// This exists so applying a single USN event is O(1): the previous design
+    /// rebuilt the entire `FileRefMap` (export all pairs, linear-scan, re-sort)
+    /// on every create/delete, which is O(n log n) per event and dominated CPU
+    /// on busy volumes. The base map stays immutable; only this overlay moves.
+    pub ref_overrides: HashMap<u64, Option<u32>>,
 }
 
 impl EsDeltaOverlay {
@@ -56,6 +68,7 @@ impl EsDeltaOverlay {
             && self.renamed.is_empty()
             && self.moved.is_empty()
             && self.deleted.is_empty()
+            && self.ref_overrides.is_empty()
     }
 
     /// Total number of pending change entries (used for snapshot triggers).

@@ -355,6 +355,25 @@ impl EsIndex {
         self.delta.inserted.get(pos)
     }
 
+    /// Resolve a file reference to its logical index, honoring the delta
+    /// overlay's O(1) overrides above the immutable base `FileRefMap`.
+    ///
+    /// The overlay wins: `Some(idx)` shadows the base mapping, `None` is a
+    /// tombstone hiding a deleted base entry. Falls through to the base map
+    /// when no override exists.
+    fn ref_lookup(&self, file_ref: u64) -> Option<u32> {
+        // Key by MFT record number (low 48 bits) so the overlay aligns with the
+        // base `FileRefMap`, which also strips the sequence number. Otherwise a
+        // record-number reuse with a bumped sequence number would key a
+        // different slot than the base map and miss the override.
+        let key = mft_record_number(file_ref);
+        match self.delta.ref_overrides.get(&key) {
+            Some(&Some(idx)) => Some(idx),
+            Some(&None) => None,
+            None => self.file_ref_map.get(file_ref),
+        }
+    }
+
     /// Return `true` when a logical index is tombstoned (base flag or overlay).
     #[must_use]
     fn logical_is_deleted(&self, index: u32) -> bool {
@@ -404,7 +423,7 @@ impl EsIndex {
             };
         }
         let parent_ref = self.inserted_at(index)?.parent_ref;
-        self.file_ref_map.get(parent_ref)
+        self.ref_lookup(parent_ref)
     }
 
     /// Effective directory flag for a logical index.
@@ -946,8 +965,7 @@ impl EsIndex {
         // NTFS uses file reference 5 for the volume root. Keep a fallback for
         // synthetic indexes and malformed/legacy caches.
         let mut current = self
-            .file_ref_map
-            .get(5)
+            .ref_lookup(5)
             .filter(|&index| root_matches(index));
         if current.is_none() {
             for index in 0..self.logical_len() {
@@ -1009,9 +1027,12 @@ impl EsIndex {
     }
 
     fn apply_delete(&mut self, file_ref: u64) {
-        if let Some(index) = self.file_ref_map.get(file_ref) {
+        if let Some(index) = self.ref_lookup(file_ref) {
             self.delta.deleted.insert(index);
-            self.file_ref_map.remove(file_ref);
+            // O(1) tombstone in the overlay; the base map stays immutable.
+            self.delta
+                .ref_overrides
+                .insert(mft_record_number(file_ref), None);
         }
     }
 
@@ -1032,11 +1053,15 @@ impl EsIndex {
             flags,
         });
         self.delta.deleted.remove(&logical);
-        self.file_ref_map.insert(event.file_ref, logical);
+        // O(1) overlay override pointing the (possibly reused) file reference
+        // at the new logical index.
+        self.delta
+            .ref_overrides
+            .insert(mft_record_number(event.file_ref), Some(logical));
     }
 
     fn apply_rename_move(&mut self, event: &EsUsnEvent) {
-        let Some(index) = self.file_ref_map.get(event.file_ref) else {
+        let Some(index) = self.ref_lookup(event.file_ref) else {
             self.apply_create(event);
             return;
         };
@@ -1046,7 +1071,7 @@ impl EsIndex {
             }
         }
         if let Some(parent_ref) = event.parent_ref {
-            if let Some(new_parent) = self.file_ref_map.get(parent_ref) {
+            if let Some(new_parent) = self.ref_lookup(parent_ref) {
                 self.set_logical_parent(index, new_parent);
             }
         }

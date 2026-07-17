@@ -575,3 +575,151 @@ fn delta_move_updates_child_path() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].path, r"C:\movedir\leaf.txt", "child path follows moved parent");
 }
+
+// ─── USN delta on BASE-snapshot records (O(1) overlay equivalence) ───────────
+//
+// The overlay refactor changed how `apply_events` maintains the file-reference
+// lookup: it no longer mutates the immutable base `FileRefMap`, it layers
+// `ref_overrides` on top. The tests below exercise the paths that touch records
+// that already existed in the base snapshot (not overlay-inserted ones) — the
+// exact cases the pre-existing delta tests did not cover. They assert observable
+// behavior (search visibility, resolved paths, sequence-number handling) so they
+// hold regardless of whether the lookup is served by the base map or the overlay.
+
+/// A base snapshot with a real file record so we can delete/rename/move it.
+fn build_base_with_file() -> EsIndex {
+    let mut b = EsIndexBuilder::new();
+    let root = b.add_record(5, u32::MAX, "C:", flags::DIRECTORY, 0).unwrap();
+    let users = b.add_record(6, root, "Users", flags::DIRECTORY, 1).unwrap();
+    b.add_record(7, users, "base_file.txt", 0, 2).unwrap();
+    b.finish().unwrap()
+}
+
+#[test]
+fn delta_delete_of_base_record_hides_it() {
+    let mut idx = build_base_with_file();
+    assert_eq!(idx.search("base_file", 10).len(), 1, "precondition: base file searchable");
+    idx.apply_events(&[EsUsnEvent {
+        kind: EsUsnEventKind::Delete,
+        file_ref: 7,
+        parent_ref: None,
+        name: None,
+        flags: None,
+    }]);
+    assert!(
+        idx.search("base_file", 10).is_empty(),
+        "deleting a BASE-snapshot record must hide it (overlay tombstone over base map)"
+    );
+}
+
+#[test]
+fn delta_delete_of_base_record_leaves_siblings() {
+    let mut b = EsIndexBuilder::new();
+    let root = b.add_record(5, u32::MAX, "C:", flags::DIRECTORY, 0).unwrap();
+    let users = b.add_record(6, root, "Users", flags::DIRECTORY, 1).unwrap();
+    b.add_record(7, users, "gone.txt", 0, 2).unwrap();
+    b.add_record(8, users, "stays.txt", 0, 2).unwrap();
+    let mut idx = b.finish().unwrap();
+    idx.apply_events(&[EsUsnEvent {
+        kind: EsUsnEventKind::Delete,
+        file_ref: 7,
+        parent_ref: None,
+        name: None,
+        flags: None,
+    }]);
+    assert!(idx.search("gone", 10).is_empty(), "deleted base record hidden");
+    let kept = idx.search("stays", 10);
+    assert_eq!(kept.len(), 1, "sibling base record unaffected");
+    assert_eq!(kept[0].path, r"C:\Users\stays.txt");
+}
+
+#[test]
+fn delta_delete_then_recreate_same_record_number_is_visible() {
+    // NTFS reuses MFT record numbers: a delete followed by a create with the
+    // SAME record number must net to the file being present under the new name.
+    // Old code: insert() overwrote the base map. New code: a Some(idx) override
+    // must supersede the None tombstone.
+    let mut idx = build_base_with_file();
+    idx.apply_events(&[EsUsnEvent {
+        kind: EsUsnEventKind::Delete,
+        file_ref: 7,
+        parent_ref: None,
+        name: None,
+        flags: None,
+    }]);
+    assert!(idx.search("base_file", 10).is_empty(), "tombstoned first");
+    idx.apply_events(&[EsUsnEvent {
+        kind: EsUsnEventKind::Create,
+        file_ref: 7,
+        parent_ref: Some(6),
+        name: Some("reborn.txt".to_owned()),
+        flags: Some(0),
+    }]);
+    assert!(idx.search("base_file", 10).is_empty(), "old name stays gone");
+    let results = idx.search("reborn.txt", 10);
+    assert_eq!(results.len(), 1, "recreated record-number must be visible again");
+    assert_eq!(results[0].path, r"C:\Users\reborn.txt");
+}
+
+#[test]
+fn delta_rename_of_base_record_updates_name() {
+    let mut idx = build_base_with_file();
+    idx.apply_events(&[EsUsnEvent {
+        kind: EsUsnEventKind::Rename,
+        file_ref: 7,
+        parent_ref: Some(6),
+        name: Some("base_renamed.txt".to_owned()),
+        flags: None,
+    }]);
+    assert!(idx.search("base_file", 10).is_empty(), "old base name gone");
+    let results = idx.search("base_renamed", 10);
+    assert_eq!(results.len(), 1, "renamed base record found under new name");
+    assert_eq!(results[0].path, r"C:\Users\base_renamed.txt");
+}
+
+#[test]
+fn delta_move_of_base_record_updates_path() {
+    let mut idx = build_base_with_file();
+    // Move base_file.txt from C:\Users up to C:\ (parent 6 -> 5).
+    idx.apply_events(&[EsUsnEvent {
+        kind: EsUsnEventKind::Move,
+        file_ref: 7,
+        parent_ref: Some(5),
+        name: None,
+        flags: None,
+    }]);
+    let results = idx.search("base_file", 10);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].path, r"C:\base_file.txt", "moved base record reparented");
+}
+
+#[test]
+fn delta_delete_ignores_sequence_number_in_file_ref() {
+    // USN records can carry a file reference whose high 16 bits hold a sequence
+    // number. The overlay keys by mft_record_number (low 48 bits), matching the
+    // base map. A delete arriving with a bumped sequence number must still hide
+    // the base record keyed by the same record number.
+    let mut idx = build_base_with_file();
+    let file_ref_with_seq = 7_u64 | (0x1234_u64 << 48);
+    assert_eq!(mft_record_number(file_ref_with_seq), 7);
+    idx.apply_events(&[EsUsnEvent {
+        kind: EsUsnEventKind::Delete,
+        file_ref: file_ref_with_seq,
+        parent_ref: None,
+        name: None,
+        flags: None,
+    }]);
+    assert!(
+        idx.search("base_file", 10).is_empty(),
+        "delete keyed by record number must hit base record despite sequence bits"
+    );
+}
+
+#[test]
+fn delta_new_index_has_no_ref_overrides() {
+    // A freshly built index must start with an empty overlay so is_empty() (used
+    // as a snapshot/compaction trigger) reflects reality.
+    let idx = build_base_with_file();
+    assert!(idx.delta.ref_overrides.is_empty());
+    assert!(idx.delta.is_empty());
+}
