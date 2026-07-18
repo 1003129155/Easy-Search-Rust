@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::builder::EsIndexBuilder;
 use crate::delta::{EsDeltaOverlay, InsertedRecord};
 use crate::error::{EsError, Result};
 use crate::path::normalize_path_for_lookup;
@@ -26,6 +27,57 @@ pub struct EsCandidateSearch {
     pub results: Vec<EsSearchResult>,
     /// Complete matching record IDs, or `None` when collection overflowed.
     pub candidate_ids: Option<Vec<u32>>,
+}
+
+/// Immutable logical view captured for lock-free index compaction.
+#[derive(Debug)]
+pub struct EsCompactSnapshot {
+    records: Vec<EsCompactRecord>,
+    status: EsIndexStatus,
+}
+
+#[derive(Debug)]
+struct EsCompactRecord {
+    logical_index: u32,
+    file_ref: u64,
+    parent_logical_index: Option<u32>,
+    name: String,
+    flags: u16,
+    rank: u16,
+}
+
+impl EsCompactSnapshot {
+    /// Rebuild the captured logical view as a fresh base index with no delta.
+    pub fn rebuild(self) -> Result<EsIndex> {
+        let mut old_to_new = BTreeMap::new();
+        for (new_index, record) in self.records.iter().enumerate() {
+            old_to_new.insert(
+                record.logical_index,
+                u32::try_from(new_index).map_err(|_| EsError::RecordCountTooLarge {
+                    len: self.records.len(),
+                })?,
+            );
+        }
+
+        let mut builder = EsIndexBuilder::with_capacity(self.records.len());
+        for record in self.records {
+            let parent = record
+                .parent_logical_index
+                .and_then(|old_parent| old_to_new.get(&old_parent).copied())
+                .unwrap_or(PARENT_NONE);
+            builder.add_record(
+                record.file_ref,
+                parent,
+                &record.name,
+                record.flags,
+                record.rank,
+            )?;
+        }
+        let mut index = builder.finish()?;
+        index.status = self.status;
+        index.status.records = u64::try_from(index.records.len()).unwrap_or(u64::MAX);
+        Ok(index)
+    }
 }
 
 /// Sorted file-reference lookup entry.
@@ -527,6 +579,67 @@ impl EsIndex {
         Some(kids)
     }
 
+    /// Number of pending delta entries waiting to be folded into the base.
+    #[must_use]
+    pub fn delta_event_count(&self) -> usize {
+        self.delta.event_count()
+    }
+
+    /// Return whether the delta reached five percent of the base record count.
+    #[must_use]
+    pub fn should_compact(&self) -> bool {
+        if self.delta.is_empty() {
+            return false;
+        }
+        let threshold = self.records.len().saturating_add(19) / 20;
+        self.delta.event_count() >= threshold.max(1)
+    }
+
+    /// Capture the current effective logical records for lock-free rebuilding.
+    pub fn compact_snapshot(&self) -> Result<EsCompactSnapshot> {
+        let logical_len = self.logical_len();
+        let mut records = Vec::with_capacity(
+            usize::try_from(logical_len)
+                .unwrap_or(usize::MAX)
+                .min(self.records.len()),
+        );
+        for index in 0..logical_len {
+            if self.logical_is_deleted(index) {
+                continue;
+            }
+            let (file_ref, flags, rank) = if index < self.base_len() {
+                let record = self.record(index)?;
+                (record.file_ref, record.flags, record.rank)
+            } else {
+                let record = self
+                    .inserted_at(index)
+                    .ok_or(EsError::RecordIndexOutOfRange {
+                        index,
+                        len: self.records.len(),
+                    })?;
+                (record.file_ref, record.flags, 0)
+            };
+            let name = self
+                .logical_name(index)
+                .ok_or(EsError::RecordIndexOutOfRange {
+                    index,
+                    len: self.records.len(),
+                })?;
+            records.push(EsCompactRecord {
+                logical_index: index,
+                file_ref,
+                parent_logical_index: self.logical_parent(index),
+                name,
+                flags,
+                rank,
+            });
+        }
+        Ok(EsCompactSnapshot {
+            records,
+            status: self.status,
+        })
+    }
+
     /// Search basenames and return slim results.
     pub fn search(&self, query: &str, limit: usize) -> Vec<EsSearchResult> {
         self.search_inner(query, limit, None)
@@ -964,9 +1077,7 @@ impl EsIndex {
 
         // NTFS uses file reference 5 for the volume root. Keep a fallback for
         // synthetic indexes and malformed/legacy caches.
-        let mut current = self
-            .ref_lookup(5)
-            .filter(|&index| root_matches(index));
+        let mut current = self.ref_lookup(5).filter(|&index| root_matches(index));
         if current.is_none() {
             for index in 0..self.logical_len() {
                 if index % 1024 == 0 && is_cancelled(cancel) {

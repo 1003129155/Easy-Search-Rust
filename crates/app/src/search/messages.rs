@@ -20,6 +20,11 @@ pub(crate) const WM_PREVIEW_READY: u32 = WM_APP + 4;
 #[cfg(windows)]
 pub(crate) const WM_ICON_READY: u32 = WM_APP + 5;
 
+/// Deferred check that hides the search window if it is still deactivated.
+/// Posting this avoids acting inside the re-entrant WM_ACTIVATE call stack.
+#[cfg(windows)]
+pub(crate) const WM_DEACTIVATE_CHECK: u32 = WM_APP + 6;
+
 /// Deferred result poll timer ID.
 #[cfg(windows)]
 pub(crate) const DEFERRED_POLL_TIMER_ID: usize = 100;

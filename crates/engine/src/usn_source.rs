@@ -33,11 +33,10 @@ pub fn poll_drive(drive_letter: char, last_usn: i64) -> Result<PollResult, Strin
     use uffs_mft::platform::DriveLetter;
     use uffs_mft::usn::{Usn, query_usn_journal, read_usn_journal};
 
-    let drive = DriveLetter::parse(drive_letter)
-        .map_err(|e| format!("DriveLetter::parse failed: {e}"))?;
+    let drive =
+        DriveLetter::parse(drive_letter).map_err(|e| format!("DriveLetter::parse failed: {e}"))?;
 
-    let info = query_usn_journal(drive)
-        .map_err(|e| format!("query_usn_journal failed: {e}"))?;
+    let info = query_usn_journal(drive).map_err(|e| format!("query_usn_journal failed: {e}"))?;
 
     let start = Usn::new(last_usn);
     match read_usn_journal(drive, info.journal_id, start) {
@@ -57,7 +56,7 @@ pub fn poll_drive(drive_letter: char, last_usn: i64) -> Result<PollResult, Strin
             // the alternative is polling being stuck forever.
             const ERROR_JOURNAL_ENTRY_DELETED: i32 = 1181;
             if e.raw_os_error() == Some(ERROR_JOURNAL_ENTRY_DELETED) {
-                eprintln!(
+                easysearch_core::log_warn!(
                     "[easysearch-engine] {drive_letter}: journal cursor too old \
                      (last_usn={last_usn}, journal first_usn={}). Advancing cursor.",
                     info.first_usn.raw()
@@ -76,7 +75,7 @@ pub fn poll_drive(drive_letter: char, last_usn: i64) -> Result<PollResult, Strin
                     Err(e2) => {
                         // Even recovery read failed — advance to next_usn
                         // so at least we stop retrying the dead range.
-                        eprintln!(
+                        easysearch_core::log_warn!(
                             "[easysearch-engine] {drive_letter}: recovery read also failed: {e2}. \
                              Advancing cursor to next_usn={}.",
                             info.next_usn.raw()

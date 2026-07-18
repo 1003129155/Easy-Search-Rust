@@ -199,7 +199,7 @@ impl ThemeEngine {
                 }
                 Err(_e) => {
                     // Silently skip invalid theme files in user directory
-                    eprintln!("Warning: failed to load theme file {:?}: {}", path, _e);
+                    easysearch_core::log_warn!("failed to load theme file {:?}: {}", path, _e);
                 }
             }
         }
@@ -207,7 +207,9 @@ impl ThemeEngine {
 
     /// Get a theme by name.
     pub fn get_theme(&self, name: &str) -> Result<&Theme, ThemeError> {
-        self.themes.get(name).ok_or_else(|| ThemeError::MissingField(format!("theme '{}' not found", name)))
+        self.themes
+            .get(name)
+            .ok_or_else(|| ThemeError::MissingField(format!("theme '{}' not found", name)))
     }
 
     /// Get the currently active theme.
@@ -245,12 +247,11 @@ impl ThemeEngine {
             use std::ffi::OsStr;
             use std::os::windows::ffi::OsStrExt;
 
-            let subkey: Vec<u16> = OsStr::new(
-                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-            )
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
+            let subkey: Vec<u16> =
+                OsStr::new(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+                    .encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect();
 
             let value_name: Vec<u16> = OsStr::new("AppsUseLightTheme")
                 .encode_wide()
@@ -305,9 +306,8 @@ impl ThemeEngine {
 
     /// Load and validate a single theme file from disk.
     fn load_theme_file(&self, path: &Path) -> Result<Theme, ThemeError> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            ThemeError::InvalidJson(format!("failed to read file: {}", e))
-        })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| ThemeError::InvalidJson(format!("failed to read file: {}", e)))?;
 
         self.parse_theme_json(&content)
     }

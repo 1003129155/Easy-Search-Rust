@@ -32,23 +32,32 @@ pub(super) fn execute_selected_safe() {
         let idx = app.selected_index.min(app.items.len() - 1);
         let item = app.items[idx].clone();
 
-        // Only record full history (for home-screen recent panel) when executing
-        // from the normal results view — NOT from context menu actions.
-        // This matches Flow.Launcher's behavior: "Add item to history only if
-        // it is from results but not context menu or history".
-        let history_key = action_to_history_key_static(&item.action);
+        // Context actions operate on the result item that opened the menu.
+        // Record that source object, not the selected menu action itself.
+        let history_item = if app.view_mode == ViewMode::ContextActions {
+            app.context_source_index
+                .and_then(|source_index| app.result_items.get(source_index))
+                .cloned()
+                .unwrap_or_else(|| item.clone())
+        } else {
+            item.clone()
+        };
+        let history_key = action_to_history_key_static(&history_item.action);
         if app.view_mode == ViewMode::Results {
-            let icon = item.icon_path.as_deref().unwrap_or(&item.icon);
+            let icon = history_item
+                .icon_path
+                .as_deref()
+                .unwrap_or(&history_item.icon);
             app.history.record_full(
                 &history_key,
-                &item.title,
-                &item.subtitle,
+                &history_item.title,
+                &history_item.subtitle,
                 icon,
-                item.is_directory,
+                history_item.is_directory,
             );
         } else {
-            // Still record usage count for frequency-based ranking,
-            // but don't add to the recent items list.
+            // Context actions affect usage ranking, but do not create a new
+            // recent-item entry. The recorded key belongs to the source item.
             app.history.record(&history_key);
         }
         app.history.save();
@@ -70,21 +79,51 @@ pub(super) fn execute_selected_safe() {
 /// Ctrl+Enter handler: for folders → open in Explorer; for files → open containing folder.
 #[cfg(windows)]
 pub(super) fn open_folder_or_containing_safe() {
-    let info = app_state::with_app_ref(|app| {
+    let info = app_state::with_app_mut(|app| {
         if app.items.is_empty() {
             return None;
         }
         let idx = app.selected_index.min(app.items.len() - 1);
-        let is_dir = app.items[idx]
+        let source_item = if app.view_mode == ViewMode::ContextActions {
+            app.context_source_index
+                .and_then(|source_index| app.result_items.get(source_index))
+                .cloned()
+                .or_else(|| app.items.get(idx).cloned())
+        } else {
+            app.items.get(idx).cloned()
+        }?;
+
+        // Ctrl+Enter also operates on the selected object. Record the source
+        // object rather than the context action, without adding context actions
+        // to the home-screen recent-items list.
+        let history_key = action_to_history_key_static(&source_item.action);
+        if app.view_mode == ViewMode::Results {
+            let icon = source_item
+                .icon_path
+                .as_deref()
+                .unwrap_or(&source_item.icon);
+            app.history.record_full(
+                &history_key,
+                &source_item.title,
+                &source_item.subtitle,
+                icon,
+                source_item.is_directory,
+            );
+        } else {
+            app.history.record(&history_key);
+        }
+        app.history.save();
+
+        let is_dir = source_item
             .context_data
             .as_ref()
             .map(|data| data.is_directory)
             .unwrap_or(false);
-        let path = app.items[idx]
+        let path = source_item
             .context_data
             .as_ref()
             .map(|data| data.file_path.clone())
-            .or_else(|| match &app.items[idx].action {
+            .or_else(|| match &source_item.action {
                 easysearch_core::Action::Open(p)
                 | easysearch_core::Action::OpenAsAdmin(p)
                 | easysearch_core::Action::EnterPathSearch(p) => Some(p.clone()),

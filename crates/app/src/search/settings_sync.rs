@@ -6,9 +6,9 @@
 use windows::Win32::Foundation::HWND;
 
 #[cfg(windows)]
-use super::plugin_bridge::build_plugin_router;
-#[cfg(windows)]
 use super::app_state::AppState;
+#[cfg(windows)]
+use super::plugin_bridge::build_plugin_router;
 #[cfg(windows)]
 use crate::shared::hotkey;
 #[cfg(windows)]
@@ -24,6 +24,12 @@ pub(super) fn apply_settings_diff(
     on_disk: &Settings,
 ) -> bool {
     let mut changed = false;
+
+    // Log level
+    if on_disk.log_level != current.log_level {
+        easysearch_core::logging::set_level_from_str(&on_disk.log_level);
+        changed = true;
+    }
 
     // Theme
     if on_disk.theme != current.theme {

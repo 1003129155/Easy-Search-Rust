@@ -437,6 +437,105 @@ fn usn_apply_empty_events_does_not_bump_generation() {
     );
 }
 
+/// Compact the effective logical view and verify the rebuilt base has no overlay.
+#[test]
+fn usn_compact_preserves_effective_state_and_clears_delta() {
+    let mut manager = DriveManager::new();
+    manager.install('C', build_test_index('C'));
+
+    manager.apply(
+        'C',
+        &[
+            EsUsnEvent {
+                kind: EsUsnEventKind::Create,
+                file_ref: 900,
+                parent_ref: Some(5),
+                name: Some("temporary.tmp".to_string()),
+                flags: Some(0),
+            },
+            EsUsnEvent {
+                kind: EsUsnEventKind::Create,
+                file_ref: 901,
+                parent_ref: Some(5),
+                name: Some("draft.txt".to_string()),
+                flags: Some(0),
+            },
+            EsUsnEvent {
+                kind: EsUsnEventKind::Rename,
+                file_ref: 901,
+                parent_ref: Some(6),
+                name: Some("final.txt".to_string()),
+                flags: None,
+            },
+            EsUsnEvent {
+                kind: EsUsnEventKind::Delete,
+                file_ref: 900,
+                parent_ref: None,
+                name: None,
+                flags: None,
+            },
+        ],
+        900,
+        77,
+    );
+
+    let candidate = manager
+        .compact_candidate()
+        .expect("5% threshold should be reached")
+        .expect("snapshot should succeed");
+    let drive = candidate.drive;
+    let revision = candidate.revision;
+    let mut rebuilt = candidate.snapshot.rebuild().expect("rebuild should succeed");
+    rebuilt.status.journal_id = candidate.journal_id;
+    rebuilt.status.last_usn = candidate.last_usn;
+
+    assert!(manager.commit_compact(drive, revision, rebuilt));
+    let index = manager.index_for('C').unwrap();
+    assert_eq!(index.delta_event_count(), 0);
+    assert_eq!(index.status.journal_id, 77);
+    assert_eq!(index.status.last_usn, 900);
+    assert!(manager.search("temporary", 10).is_empty());
+    let final_result = manager.search("final", 10);
+    assert!(final_result.iter().any(|result| result.path == r"C:\src\final.txt"));
+}
+
+/// A compact result must not replace a drive changed by a later USN batch.
+#[test]
+fn stale_compact_candidate_is_rejected() {
+    let mut manager = DriveManager::new();
+    manager.install('C', build_test_index('C'));
+    manager.apply(
+        'C',
+        &[EsUsnEvent {
+            kind: EsUsnEventKind::Create,
+            file_ref: 910,
+            parent_ref: Some(5),
+            name: Some("first.txt".to_string()),
+            flags: Some(0),
+        }],
+        100,
+        1,
+    );
+
+    let candidate = manager.compact_candidate().unwrap().unwrap();
+    let rebuilt = candidate.snapshot.rebuild().unwrap();
+    manager.apply(
+        'C',
+        &[EsUsnEvent {
+            kind: EsUsnEventKind::Create,
+            file_ref: 911,
+            parent_ref: Some(5),
+            name: Some("second.txt".to_string()),
+            flags: Some(0),
+        }],
+        200,
+        1,
+    );
+
+    assert!(!manager.commit_compact(candidate.drive, candidate.revision, rebuilt));
+    assert!(manager.search("second", 10).iter().any(|result| result.name == "second.txt"));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 4. 多盘符索引
 // ─────────────────────────────────────────────────────────────────────────────

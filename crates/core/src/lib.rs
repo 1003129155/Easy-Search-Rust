@@ -12,6 +12,7 @@ pub mod context_labels;
 pub mod delta;
 pub mod error;
 pub mod index;
+pub mod logging;
 pub mod path;
 pub mod paths;
 pub mod plugin;
@@ -26,7 +27,7 @@ mod audit_tests;
 pub use builder::EsIndexBuilder;
 pub use error::{EsError, Result};
 pub use index::EsCandidateSearch;
-pub use index::{EsIndex, FileRefEntry, FileRefMap};
+pub use index::{EsCompactSnapshot, EsIndex, FileRefEntry, FileRefMap};
 pub use plugin::{
     Action, CancelToken, ContextAction, ContextData, Plugin, PluginResult, PluginRouterInfo,
     Router, SettingControl, SettingItem, SystemCmd,

@@ -16,9 +16,7 @@ use windows::Win32::UI::Input::Ime::{
     ImmSetCompositionWindow,
 };
 #[cfg(windows)]
-use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
-#[cfg(windows)]
-use windows::Win32::UI::Input::KeyboardAndMouse::VK_CONTROL;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_MENU};
 use windows::Win32::UI::WindowsAndMessaging::*;
 #[cfg(windows)]
 use windows::core::PCWSTR;
@@ -47,7 +45,7 @@ const CLASS_NAME: &str = "EasySearchWindow";
 /// Run the GUI application.
 #[cfg(windows)]
 pub fn run() -> Result<(), String> {
-    crate::log!("run() entered");
+    easysearch_core::log_debug!("run() entered");
 
     unsafe {
         // Initialize COM (needed for WIC, Shell)
@@ -56,7 +54,7 @@ pub fn run() -> Result<(), String> {
             windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
         );
     }
-    crate::log!("COM initialized");
+    easysearch_core::log_debug!("COM initialized");
 
     let hinstance =
         unsafe { GetModuleHandleW(None) }.map_err(|e| format!("GetModuleHandleW failed: {e}"))?;
@@ -103,7 +101,7 @@ pub fn run() -> Result<(), String> {
         )
     }
     .map_err(|e| format!("CreateWindowExW failed: {e}"))?;
-    crate::log!("Window handle created: {:?}", hwnd.0);
+    easysearch_core::log_debug!("Window handle created: {:?}", hwnd.0);
 
     // Now that we have hwnd, get the actual per-monitor DPI and resize if different
     let actual_width = layout::window_width_scaled(hwnd);
@@ -124,18 +122,18 @@ pub fn run() -> Result<(), String> {
 
     // Initialize renderer
     let mut renderer = Renderer::new()?;
-    crate::log!("Renderer created");
+    easysearch_core::log_debug!("Renderer created");
     renderer.create_render_target(hwnd, actual_width as u32, actual_height as u32)?;
-    crate::log!("Render target created");
+    easysearch_core::log_debug!("Render target created");
 
     // Apply DWM window styling (Win11 round corners + shadow)
     apply_dwm_style(hwnd);
-    crate::log!("DWM style applied");
+    easysearch_core::log_debug!("DWM style applied");
     // Register global hotkey
     if !hotkey::register(hwnd) {
-        crate::log!("WARNING: failed to register hotkey (Alt+Space)");
+        easysearch_core::log_warn!("failed to register hotkey (Alt+Space)");
     } else {
-        crate::log!("Hotkey Alt+Space registered successfully");
+        easysearch_core::log_debug!("Hotkey Alt+Space registered successfully");
     }
 
     // Add tray icon
@@ -160,7 +158,7 @@ pub fn run() -> Result<(), String> {
         }
     }
 
-    crate::log!("Window created, tray icon added. Entering message loop...");
+    easysearch_core::log_debug!("Window created, tray icon added. Entering message loop...");
 
     // ── Initialize search engine ──────────────────────────────────────────────
     let engine_for_search = super::engine_bridge::start_engine(hwnd);
@@ -598,48 +596,37 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
 
-        WM_ACTIVATE => {
-            // Hide on deactivation (lost focus)
-            let activation = (wparam.0 as u32) & 0xFFFF;
-            if activation == 0 {
-                // WA_INACTIVE
-                let is_visible = app_state::with_app_ref(|app| app.visible).unwrap_or(false);
-                if is_visible {
-                    hide_window();
-                    // Fallback: if hide_window couldn't acquire the borrow (RefCell contention),
-                    // the window might still be visible. Force-hide it at the Win32 level so
-                    // the user never sees a "ghost" window lingering without focus.
-                    let still_visible = unsafe { IsWindowVisible(hwnd) }.as_bool();
-                    if still_visible {
-                        crate::log!(
-                            "WM_ACTIVATE: hide_window failed (borrow contention), force hiding via Win32"
-                        );
-                        unsafe {
-                            let _ = ShowWindow(hwnd, SW_HIDE);
-                        }
-                        // Mark visible=false when the borrow becomes available
-                        app_state::with_app_mut(|app| {
-                            if app.visible {
-                                app.visible = false;
-                                app.input.clear();
-                                app.items.clear();
-                                app.result_items.clear();
-                                app.context_items.clear();
-                                app.plugin_items.clear();
-                                app.deferred_query = None;
-                                app.plugin_router.reset_search_sessions();
-                                app.selected_index = 0;
-                                app.result_selected_index = 0;
-                                app.context_selected_index = 0;
-                                app.context_source_index = None;
-                                app.view_mode = ViewMode::Results;
-                                app.pending_ime_char_suppression = 0;
-                                app.input_focused = true;
-                            }
-                        });
-                    }
-                }
+        WM_SYSKEYDOWN => {
+            if handle_keydown(wparam) {
+                LRESULT(0)
+            } else {
+                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
+        }
+
+        WM_SYSCHAR
+            if unsafe { GetKeyState(VK_MENU.0 as i32) } < 0
+                && (0x31..=0x39).contains(&(wparam.0 as u16)) =>
+        {
+            LRESULT(0)
+        }
+
+        WM_ACTIVATE => {
+            if (wparam.0 as u32) & 0xFFFF == WA_INACTIVE as u32 {
+                super::visibility::queue_deactivation_check(hwnd);
+            }
+            LRESULT(0)
+        }
+
+        WM_ACTIVATEAPP => {
+            if wparam.0 == 0 {
+                super::visibility::queue_deactivation_check(hwnd);
+            }
+            LRESULT(0)
+        }
+
+        WM_DEACTIVATE_CHECK => {
+            super::visibility::hide_if_deactivated(hwnd);
             LRESULT(0)
         }
 
@@ -855,7 +842,7 @@ unsafe extern "system" fn wnd_proc(
                 }
 
                 app.renderer.resize(new_width as u32, new_height as u32);
-                crate::log!(
+                easysearch_core::log_debug!(
                     "WM_DPICHANGED: dpi_scale={:.2}, resized to {}x{}",
                     layout::dpi_scale(app.hwnd),
                     new_width,
@@ -946,7 +933,7 @@ unsafe extern "system" fn wnd_proc(
 
 /// Handle keydown events.
 #[cfg(windows)]
-fn handle_keydown(wparam: WPARAM) {
+fn handle_keydown(wparam: WPARAM) -> bool {
     let cmd = app_state::with_app_ref(|app| {
         let idx = app.selected_index.min(app.items.len().saturating_sub(1));
         let is_hint = app.view_mode == ViewMode::Results
@@ -963,6 +950,7 @@ fn handle_keydown(wparam: WPARAM) {
     })
     .unwrap_or(super::key_command::KeyCommand::None);
 
+    let handled = cmd != super::key_command::KeyCommand::None;
     let deferred = app_state::with_app_mut(|app| super::key_command::execute_key_command(app, cmd))
         .unwrap_or(super::key_command::DeferredAction::None);
 
@@ -990,6 +978,7 @@ fn handle_keydown(wparam: WPARAM) {
     }
 
     do_render();
+    handled
 }
 
 /// Called when input text changes — queries plugins via Router.

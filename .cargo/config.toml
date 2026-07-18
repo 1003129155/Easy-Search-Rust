@@ -1,5 +1,7 @@
 [build]
-# rustc-wrapper = "sccache"  # TEMP: disabled (sccache 未インストール)
+rustc-wrapper = "sccache"
 
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-cpu=native"]
+# Keep release binaries portable across x86-64 Windows machines and avoid
+# requiring the Microsoft Visual C++ Redistributable at runtime.
+rustflags = ["-C", "target-cpu=x86-64", "-C", "target-feature=+crt-static"]

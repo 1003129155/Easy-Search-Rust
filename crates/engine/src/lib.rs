@@ -112,6 +112,8 @@ pub struct SearchEngine {
     shutdown: Arc<AtomicBool>,
     config: EngineConfig,
     metrics: Arc<EngineMetrics>,
+    /// Global gate: at most one drive may compact at a time.
+    compact_in_flight: Arc<AtomicBool>,
     /// Channel to send commands to the background worker.
     command_tx: std::sync::mpsc::Sender<WorkerCommand>,
     /// Event sender (cloned to background threads).
@@ -132,6 +134,7 @@ impl SearchEngine {
             shutdown: Arc::new(AtomicBool::new(false)),
             config,
             metrics: Arc::new(EngineMetrics::new()),
+            compact_in_flight: Arc::new(AtomicBool::new(false)),
             command_tx,
             event_tx,
         }
@@ -154,6 +157,7 @@ impl SearchEngine {
         let shutdown = Arc::clone(&self.shutdown);
         let config = self.config.clone();
         let metrics = Arc::clone(&self.metrics);
+        let compact_in_flight = Arc::clone(&self.compact_in_flight);
         let event_tx = self.event_tx.clone();
 
         thread::Builder::new()
@@ -193,8 +197,8 @@ impl SearchEngine {
                                     error: err.clone(),
                                 },
                             );
-                            eprintln!(
-                                "[easysearch-engine] {drive_letter}: index build failed: {err}"
+                            easysearch_core::log_error!(
+                                "{drive_letter}: index build failed: {err}"
                             );
                         }
                     }
@@ -205,7 +209,7 @@ impl SearchEngine {
                 emit(&event_tx, EngineEvent::AllReady);
 
                 // Phase 2: USN journal polling loop
-                emit_log(&event_tx, format!(
+                emit_log(&event_tx, easysearch_core::logging::LogLevel::Info, format!(
                     "[easysearch-engine] USN polling started (interval=1s, drives={:?})",
                     config.auto_index_drives
                 ));
@@ -221,7 +225,7 @@ impl SearchEngine {
                     // Log a heartbeat every 60 cycles (≈1 minute) so users know polling is alive
                     if poll_cycle % 60 == 0 {
                         let total_records = inner.read().map(|mgr| mgr.record_count()).unwrap_or(0);
-                        emit_log(&event_tx, format!(
+                        emit_log(&event_tx, easysearch_core::logging::LogLevel::Debug, format!(
                             "[easysearch-engine] USN poll heartbeat: cycle={}, total_records={}",
                             poll_cycle, total_records
                         ));
@@ -242,7 +246,7 @@ impl SearchEngine {
                             // Only log once per drive when cursor is missing
                             let count = fail_counts.entry(drive_letter).or_insert(0);
                             if *count == 0 {
-                                emit_log(&event_tx, format!(
+                                emit_log(&event_tx, easysearch_core::logging::LogLevel::Warn, format!(
                                     "[easysearch-engine] {drive_letter}: no cursor available (index not loaded?), skipping poll"
                                 ));
                             }
@@ -259,7 +263,7 @@ impl SearchEngine {
                                 let cursor_advanced = poll.new_last_usn != last_usn;
 
                                 if event_count > 0 {
-                                    emit_log(&event_tx, format!(
+                                    emit_log(&event_tx, easysearch_core::logging::LogLevel::Debug, format!(
                                         "[easysearch-engine] {drive_letter}: USN poll found {} events (usn {} -> {})",
                                         event_count, last_usn, poll.new_last_usn
                                     ));
@@ -271,6 +275,11 @@ impl SearchEngine {
                                             poll.journal_id,
                                         );
                                     }
+                                    schedule_compact(
+                                        &inner,
+                                        &compact_in_flight,
+                                        config.cache_dir.clone(),
+                                    );
                                     metrics.record_usn_events(event_count);
                                     emit(
                                         &event_tx,
@@ -297,7 +306,7 @@ impl SearchEngine {
                                 *count += 1;
                                 // Log first failure and then every 30 consecutive failures
                                 if *count == 1 || *count % 30 == 0 {
-                                    emit_log(&event_tx, format!(
+                                    emit_log(&event_tx, easysearch_core::logging::LogLevel::Warn, format!(
                                         "[easysearch-engine] {drive_letter}: USN poll failed (count={}): {}",
                                         count, err
                                     ));
@@ -650,10 +659,140 @@ fn emit(tx: &Option<EventSender>, event: EngineEvent) {
     }
 }
 
-/// Emit a log message both to stderr and to the event channel.
-fn emit_log(tx: &Option<EventSender>, msg: String) {
-    eprintln!("{msg}");
+/// Emit a typed log message and retain the event for diagnostics consumers.
+fn emit_log(tx: &Option<EventSender>, level: easysearch_core::logging::LogLevel, msg: String) {
+    easysearch_core::logging::write(level, module_path!(), &msg);
     emit(tx, EngineEvent::Log { message: msg });
+}
+
+fn schedule_compact(
+    manager: &Arc<RwLock<DriveManager>>,
+    compact_in_flight: &Arc<AtomicBool>,
+    cache_dir: Option<std::path::PathBuf>,
+) {
+    if compact_in_flight
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    let candidate = manager
+        .read()
+        .ok()
+        .and_then(|manager| manager.compact_candidate());
+    let Some(candidate) = candidate else {
+        compact_in_flight.store(false, Ordering::Release);
+        return;
+    };
+    let Ok(candidate) = candidate else {
+        easysearch_core::log_warn!("failed to capture compact snapshot");
+        compact_in_flight.store(false, Ordering::Release);
+        return;
+    };
+
+    let manager = Arc::clone(manager);
+    let gate = Arc::clone(compact_in_flight);
+    let spawn = thread::Builder::new()
+        .name(format!("engine-compact-{}", candidate.drive))
+        .spawn(move || {
+            let _gate = CompactGate(gate);
+            let started = Instant::now();
+            easysearch_core::log_info!(
+                "{}: compact started (delta={}, base={}, threshold=5%)",
+                candidate.drive,
+                candidate.delta_events,
+                candidate.base_records
+            );
+            let mut rebuilt = match candidate.snapshot.rebuild() {
+                Ok(index) => index,
+                Err(error) => {
+                    easysearch_core::log_warn!(
+                        "{}: compact rebuild failed: {error}",
+                        candidate.drive
+                    );
+                    return;
+                }
+            };
+            rebuilt.status.journal_id = candidate.journal_id;
+            rebuilt.status.last_usn = candidate.last_usn;
+
+            let rebuilt_records = rebuilt.records_len();
+            let committed = manager
+                .write()
+                .ok()
+                .and_then(|mut manager| {
+                    if !manager.compact_revision_matches(candidate.drive, candidate.revision) {
+                        return None;
+                    }
+                    let ok = manager.commit_compact(candidate.drive, candidate.revision, rebuilt);
+                    ok.then_some(())
+                });
+            if committed.is_none() {
+                easysearch_core::log_debug!(
+                    "{}: compact discarded because the index changed during rebuild",
+                    candidate.drive
+                );
+                return;
+            }
+
+            // Write cache outside the write lock so search is never blocked by disk I/O.
+            // Acquire a short read lock to access the freshly committed index.
+            if let Ok(mgr) = manager.read() {
+                if let Some(index) = mgr.index_for(candidate.drive) {
+                    persist_compact_cache(candidate.drive, index, cache_dir.as_deref());
+                }
+            }
+
+            easysearch_core::log_info!(
+                "{}: compact finished in {:.2}s (records={})",
+                candidate.drive,
+                started.elapsed().as_secs_f64(),
+                rebuilt_records
+            );
+        });
+    if let Err(error) = spawn {
+        compact_in_flight.store(false, Ordering::Release);
+        easysearch_core::log_warn!("failed to spawn compact worker: {error}");
+    }
+}
+
+struct CompactGate(Arc<AtomicBool>);
+
+impl Drop for CompactGate {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(windows)]
+fn persist_compact_cache(
+    drive: char,
+    index: &easysearch_core::EsIndex,
+    cache_dir: Option<&std::path::Path>,
+) {
+    let Some(cache_dir) = cache_dir else {
+        return;
+    };
+    let Some(volume_serial) = drive_manager::volume_serial(drive) else {
+        return;
+    };
+    if let Err(error) = easysearch_core::cache::write_flow_cache(
+        index,
+        cache_dir,
+        volume_serial,
+        index.status.journal_id,
+    ) {
+        easysearch_core::log_warn!("{drive}: compact cache write failed: {error}");
+    }
+}
+
+#[cfg(not(windows))]
+fn persist_compact_cache(
+    _drive: char,
+    _index: &easysearch_core::EsIndex,
+    _cache_dir: Option<&std::path::Path>,
+) {
 }
 
 fn path_depth(path: &str) -> usize {

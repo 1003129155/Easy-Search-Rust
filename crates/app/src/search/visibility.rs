@@ -28,17 +28,17 @@ use super::plugin_bridge::build_home_screen;
 /// Toggle window visibility — if visible, hide; if hidden, show.
 #[cfg(windows)]
 pub(super) fn toggle_visibility() {
-    crate::log!("toggle_visibility called");
+    easysearch_core::log_debug!("toggle_visibility called");
 
     // Read current visibility state without holding borrow during Win32 calls
     let (is_visible, hwnd) =
         app_state::with_app_ref(|app| (app.visible, app.hwnd)).unwrap_or((false, HWND::default()));
 
     if is_visible {
-        crate::log!("  -> hiding window");
+        easysearch_core::log_debug!("  -> hiding window");
         hide_window();
     } else {
-        crate::log!("  -> showing window");
+        easysearch_core::log_debug!("  -> showing window");
         // Show: Win32 calls in show_window can trigger re-entrant messages,
         // so we must NOT hold the borrow_mut during those calls.
         show_window_safe(hwnd);
@@ -50,7 +50,7 @@ pub(super) fn toggle_visibility() {
 /// (IME initialization, WM_PAINT), so we must NOT hold the RefCell borrow.
 #[cfg(windows)]
 pub(super) fn show_window_safe(hwnd: HWND) {
-    crate::log!("show_window_safe: start");
+    easysearch_core::log_debug!("show_window_safe: start");
 
     // Populate the home-screen plugin hints if the box is empty, and get the
     // resulting item count (used to size the window below).
@@ -78,7 +78,7 @@ pub(super) fn show_window_safe(hwnd: HWND) {
 
         let mut cursor_pos = windows::Win32::Foundation::POINT { x: 0, y: 0 };
         GetCursorPos(&mut cursor_pos);
-        crate::log!(
+        easysearch_core::log_debug!(
             "show_window_safe: cursor at ({}, {})",
             cursor_pos.x,
             cursor_pos.y
@@ -104,7 +104,9 @@ pub(super) fn show_window_safe(hwnd: HWND) {
         let x = work.left + (mon_width - width) / 2;
         let y = work.top + mon_height / 4;
 
-        crate::log!("show_window_safe: SetWindowPos x={x} y={y} w={width} h={height}");
+        easysearch_core::log_debug!(
+            "show_window_safe: SetWindowPos x={x} y={y} w={width} h={height}"
+        );
         let _ = SetWindowPos(
             hwnd,
             Some(HWND_TOPMOST),
@@ -118,21 +120,11 @@ pub(super) fn show_window_safe(hwnd: HWND) {
         // Pre-render content BEFORE showing the window so the first visible
         // frame already has a fully-painted client area (avoids the "border
         // appears before content" flash).
-        crate::log!("show_window_safe: pre-render before ShowWindow");
+        easysearch_core::log_debug!("show_window_safe: pre-render before ShowWindow");
         super::render_bridge::do_render();
 
-        crate::log!("show_window_safe: ShowWindow(SW_SHOW)");
-        let _ = ShowWindow(hwnd, SW_SHOW);
-
-        // Force foreground focus using AttachThreadInput trick.
-        // SetForegroundWindow can silently fail if the calling thread doesn't
-        // own the foreground lock. By attaching to the foreground window's thread
-        // first, we inherit its foreground rights.
-        crate::log!("show_window_safe: force foreground focus");
-        force_foreground(hwnd);
-
-        crate::log!("show_window_safe: SetFocus");
-        let _ = SetFocus(Some(hwnd));
+        easysearch_core::log_debug!("show_window_safe: show and force foreground focus");
+        show_window_and_activate(hwnd);
 
         // Ensure IME context is properly associated with the focused window.
         // Some IMEs lose context when a WS_POPUP window regains focus.
@@ -144,38 +136,152 @@ pub(super) fn show_window_safe(hwnd: HWND) {
         }
     }
 
-    crate::log!("show_window_safe: done, visible=true");
+    easysearch_core::log_debug!("show_window_safe: done, visible=true");
+}
+
+/// Show the popup and activate it while the foreground input queue is
+/// attached. `ShowWindow(SW_SHOW)` is deliberately performed inside the
+/// attachment window so its synchronous activation messages use the same
+/// input queue as the foreground application.
+#[cfg(windows)]
+unsafe fn show_window_and_activate(hwnd: HWND) {
+    unsafe {
+        let foreground = GetForegroundWindow();
+        let our_tid = GetCurrentThreadId();
+        let foreground_tid = if foreground.0 == std::ptr::null_mut() || foreground == hwnd {
+            0
+        } else {
+            GetWindowThreadProcessId(foreground, None)
+        };
+        let should_attach = foreground_tid != 0 && foreground_tid != our_tid;
+
+        if should_attach {
+            let _ = AttachThreadInput(our_tid, foreground_tid, true);
+        }
+
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = SetForegroundWindow(hwnd);
+        let _ = SetFocus(Some(hwnd));
+
+        if should_attach {
+            let _ = AttachThreadInput(our_tid, foreground_tid, false);
+        }
+
+        easysearch_core::log_debug!(
+            "show_window_and_activate: foreground={}",
+            GetForegroundWindow() == hwnd
+        );
+    }
 }
 
 /// Force a window to the foreground, working around Windows' restrictions.
 ///
 /// `SetForegroundWindow` can silently fail if the calling thread doesn't hold
-/// the "foreground lock." The standard workaround is to temporarily attach our
-/// input queue to the thread that currently owns the foreground window; this
-/// gives us the right to call `SetForegroundWindow` successfully.
+/// the "foreground lock." Temporarily attaching our input queue to the current
+/// foreground thread lets us activate and focus the popup before detaching.
 #[cfg(windows)]
 unsafe fn force_foreground(hwnd: HWND) {
     unsafe {
         let foreground = GetForegroundWindow();
         let our_tid = GetCurrentThreadId();
+        let foreground_tid = if foreground.0 == std::ptr::null_mut() || foreground == hwnd {
+            0
+        } else {
+            GetWindowThreadProcessId(foreground, None)
+        };
+        let should_attach = foreground_tid != 0 && foreground_tid != our_tid;
 
-        if foreground.0 == std::ptr::null_mut() || foreground == hwnd {
-            // No foreground window or we're already it — simple path
-            let _ = SetForegroundWindow(hwnd);
-            return;
+        if should_attach {
+            let _ = AttachThreadInput(our_tid, foreground_tid, true);
         }
 
-        let fg_tid = GetWindowThreadProcessId(foreground, None);
+        let _ = SetForegroundWindow(hwnd);
+        let _ = SetFocus(Some(hwnd));
 
-        if fg_tid != our_tid && fg_tid != 0 {
-            // Attach to the foreground thread's input queue
-            let _ = AttachThreadInput(our_tid, fg_tid, true);
-            let _ = SetForegroundWindow(hwnd);
-            let _ = AttachThreadInput(our_tid, fg_tid, false);
-        } else {
-            let _ = SetForegroundWindow(hwnd);
+        if should_attach {
+            let _ = AttachThreadInput(our_tid, foreground_tid, false);
+        }
+
+        easysearch_core::log_debug!(
+            "force_foreground: foreground={}",
+            GetForegroundWindow() == hwnd
+        );
+    }
+}
+
+/// Queue a deactivation check after the current Win32 message stack unwinds.
+///
+/// Activation APIs send messages synchronously, often while `AppState` is
+/// borrowed. Deferring the check prevents a transient borrow failure from
+/// permanently dropping the only notification that the window lost focus.
+#[cfg(windows)]
+pub(super) fn queue_deactivation_check(hwnd: HWND) {
+    unsafe {
+        let _ = PostMessageW(
+            Some(hwnd),
+            WM_DEACTIVATE_CHECK,
+            Default::default(),
+            Default::default(),
+        );
+    }
+}
+
+/// Hide the window when it remains visible but no longer owns the foreground.
+/// A stale queued check is harmless if the window was reactivated in between.
+#[cfg(windows)]
+pub(super) fn hide_if_deactivated(hwnd: HWND) {
+    let is_visible = unsafe { IsWindowVisible(hwnd) }.as_bool();
+    if is_visible && unsafe { GetForegroundWindow() } == hwnd {
+        return;
+    }
+
+    if is_visible {
+        easysearch_core::log_debug!("deactivation check: foreground moved away, hiding window");
+        hide_window();
+    }
+
+    if unsafe { IsWindowVisible(hwnd) }.as_bool() {
+        easysearch_core::log_debug!("deactivation check: state busy, force hiding via Win32");
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+            let _ = KillTimer(Some(hwnd), DEFERRED_POLL_TIMER_ID);
         }
     }
+
+    // Repair logical state even if Win32 was force-hidden above. If another
+    // synchronous callback still owns the state borrow, retry on the next turn.
+    let repaired = app_state::with_app_mut(|app| {
+        if app.visible {
+            clear_hidden_state(app);
+        }
+    })
+    .is_some();
+    if !repaired {
+        queue_deactivation_check(hwnd);
+    }
+}
+
+#[cfg(windows)]
+fn clear_hidden_state(app: &mut super::app_state::AppState) -> HWND {
+    let hwnd = app.hwnd;
+    app.visible = false;
+    app.input.clear();
+    app.items.clear();
+    app.result_items.clear();
+    app.context_items.clear();
+    app.plugin_items.clear();
+    app.deferred_query = None;
+    app.plugin_router.reset_search_sessions();
+    app.preview = None;
+    app.preview_seq += 1;
+    app.selected_index = 0;
+    app.result_selected_index = 0;
+    app.context_selected_index = 0;
+    app.context_source_index = None;
+    app.view_mode = ViewMode::Results;
+    app.pending_ime_char_suppression = 0;
+    app.input_focused = true;
+    hwnd
 }
 
 /// Hide the window and clear input.
@@ -186,25 +292,7 @@ pub(super) fn hide_window() {
         if !app.visible {
             return None;
         }
-        let h = app.hwnd;
-        app.visible = false;
-        app.input.clear();
-        app.items.clear();
-        app.result_items.clear();
-        app.context_items.clear();
-        app.plugin_items.clear();
-        app.deferred_query = None;
-        app.plugin_router.reset_search_sessions();
-        app.preview = None;
-        app.preview_seq += 1;
-        app.selected_index = 0;
-        app.result_selected_index = 0;
-        app.context_selected_index = 0;
-        app.context_source_index = None;
-        app.view_mode = ViewMode::Results;
-        app.pending_ime_char_suppression = 0;
-        app.input_focused = true;
-        Some(h)
+        Some(clear_hidden_state(app))
     })
     .flatten();
 
@@ -231,7 +319,7 @@ pub(super) fn show_window(app: &mut super::app_state::AppState) {
 
         let mut cursor_pos = windows::Win32::Foundation::POINT { x: 0, y: 0 };
         GetCursorPos(&mut cursor_pos);
-        crate::log!(
+        easysearch_core::log_debug!(
             "show_window: cursor at ({}, {})",
             cursor_pos.x,
             cursor_pos.y
@@ -257,7 +345,7 @@ pub(super) fn show_window(app: &mut super::app_state::AppState) {
         let x = work.left + (mon_width - width) / 2;
         let y = work.top + mon_height / 4;
 
-        crate::log!("show_window: SetWindowPos x={x} y={y} w={width} h={height}");
+        easysearch_core::log_debug!("show_window: SetWindowPos x={x} y={y} w={width} h={height}");
         let _ = SetWindowPos(
             app.hwnd,
             Some(HWND_TOPMOST),
@@ -268,17 +356,14 @@ pub(super) fn show_window(app: &mut super::app_state::AppState) {
             SWP_NOACTIVATE,
         );
 
-        crate::log!("show_window: ShowWindow(SW_SHOW)");
+        easysearch_core::log_debug!("show_window: ShowWindow(SW_SHOW)");
         let _ = ShowWindow(app.hwnd, SW_SHOW);
 
-        crate::log!("show_window: force foreground focus");
+        easysearch_core::log_debug!("show_window: force foreground focus");
         force_foreground(app.hwnd);
-
-        crate::log!("show_window: SetFocus");
-        let _ = SetFocus(Some(app.hwnd));
     }
     app.visible = true;
-    crate::log!("show_window: done, visible=true");
+    easysearch_core::log_debug!("show_window: done, visible=true");
 }
 
 /// Hide with fade-out animation (old version — only call when already holding borrow

@@ -20,6 +20,10 @@ fn default_language() -> String {
     String::new() // empty = auto-detect from OS locale
 }
 
+fn default_log_level() -> String {
+    "warn".to_string()
+}
+
 // ─── Settings struct ────────────────────────────────────────────────────────
 
 /// User-facing application settings, persisted as JSON.
@@ -36,6 +40,10 @@ pub struct Settings {
     /// Language locale code (e.g. "en", "zh-CN", "ja"). Empty means auto-detect.
     #[serde(default = "default_language")]
     pub language: String,
+
+    /// Minimum application log level: debug, info, warn, or error.
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
 
     /// Last window X position (None = center on screen)
     #[serde(default)]
@@ -64,6 +72,7 @@ impl Default for Settings {
             hotkey: default_hotkey(),
             theme: default_theme(),
             language: default_language(),
+            log_level: default_log_level(),
             window_x: None,
             window_y: None,
             plugins_enabled: HashMap::new(),
@@ -131,10 +140,8 @@ mod tests {
 
     /// Helper: create a unique temp directory for test isolation.
     fn test_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "easysearch_test_{}_{name}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("easysearch_test_{}_{name}", std::process::id()));
         // Clean up any previous run
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();

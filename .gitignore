@@ -13,3 +13,15 @@ Thumbs.db
 .DS_Store
 
 # Cargo lock is fine to commit for binaries
+# Local build/test scripts
+build.ps1
+test-cli.ps1
+build_err.txt
+build_test_out.txt
+build_test_out2.txt
+
+# AI agent guidance (local only)
+AGENTS.md
+
+# Abandoned plugins
+/不要文件/

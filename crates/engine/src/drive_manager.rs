@@ -17,8 +17,26 @@ use crate::search_session::{CandidateSearchOutput, DriveCandidateSet};
 /// Owns the loaded indexes, one per drive.
 #[derive(Debug, Default)]
 pub struct DriveManager {
-    indexes: Vec<(char, EsIndex)>,
+    indexes: Vec<DriveIndex>,
     generation: u64,
+}
+
+#[derive(Debug)]
+struct DriveIndex {
+    letter: char,
+    index: EsIndex,
+    revision: u64,
+}
+
+/// Lock-free compact input tagged with the drive revision it represents.
+pub struct CompactCandidate {
+    pub drive: char,
+    pub revision: u64,
+    pub snapshot: easysearch_core::EsCompactSnapshot,
+    pub journal_id: u64,
+    pub last_usn: i64,
+    pub delta_events: usize,
+    pub base_records: usize,
 }
 
 impl DriveManager {
@@ -30,7 +48,7 @@ impl DriveManager {
 
     /// Return an iterator over all loaded indexes.
     pub fn indexes(&self) -> impl Iterator<Item = &EsIndex> {
-        self.indexes.iter().map(|(_, idx)| idx)
+        self.indexes.iter().map(|entry| &entry.index)
     }
 
     /// Total number of loaded records across all drives.
@@ -46,14 +64,14 @@ impl DriveManager {
     pub fn drive_labels(&self) -> Vec<String> {
         self.indexes
             .iter()
-            .map(|(letter, _)| format!("{letter}:"))
+            .map(|entry| format!("{}:", entry.letter))
             .collect()
     }
 
     /// Return loaded drive letters (uppercase).
     #[must_use]
     pub fn drive_letters(&self) -> Vec<char> {
-        self.indexes.iter().map(|(letter, _)| *letter).collect()
+        self.indexes.iter().map(|entry| entry.letter).collect()
     }
 
     /// Get a reference to the index for a specific drive.
@@ -62,8 +80,8 @@ impl DriveManager {
         let letter = drive_letter.to_ascii_uppercase();
         self.indexes
             .iter()
-            .find(|(l, _)| *l == letter)
-            .map(|(_, idx)| idx)
+            .find(|entry| entry.letter == letter)
+            .map(|entry| &entry.index)
     }
 
     /// Monotonic version of the loaded logical record space.
@@ -76,7 +94,7 @@ impl DriveManager {
     pub fn remove(&mut self, drive_letter: char) {
         let letter = drive_letter.to_ascii_uppercase();
         let old_len = self.indexes.len();
-        self.indexes.retain(|(l, _)| *l != letter);
+        self.indexes.retain(|entry| entry.letter != letter);
         if self.indexes.len() != old_len {
             self.bump_generation();
         }
@@ -85,8 +103,12 @@ impl DriveManager {
     /// Install (or replace) the index for `drive_letter`.
     pub fn install(&mut self, drive_letter: char, index: EsIndex) {
         let letter = drive_letter.to_ascii_uppercase();
-        self.indexes.retain(|(l, _)| *l != letter);
-        self.indexes.push((letter, index));
+        self.indexes.retain(|entry| entry.letter != letter);
+        self.indexes.push(DriveIndex {
+            letter,
+            index,
+            revision: 0,
+        });
         self.bump_generation();
     }
 
@@ -96,8 +118,8 @@ impl DriveManager {
         let letter = drive_letter.to_ascii_uppercase();
         self.indexes
             .iter()
-            .find(|(l, _)| *l == letter)
-            .map(|(_, idx)| (idx.status.journal_id, idx.status.last_usn))
+            .find(|entry| entry.letter == letter)
+            .map(|entry| (entry.index.status.journal_id, entry.index.status.last_usn))
     }
 
     /// Apply incremental USN events to a drive's index and advance its cursor.
@@ -109,14 +131,65 @@ impl DriveManager {
         journal_id: u64,
     ) {
         let letter = drive_letter.to_ascii_uppercase();
-        if let Some((_, index)) = self.indexes.iter_mut().find(|(l, _)| *l == letter) {
-            index.apply_events(events);
-            index.status.last_usn = new_last_usn;
-            index.status.journal_id = journal_id;
+        if let Some(entry) = self.indexes.iter_mut().find(|entry| entry.letter == letter) {
+            entry.index.apply_events(events);
+            entry.index.status.last_usn = new_last_usn;
+            entry.index.status.journal_id = journal_id;
             if !events.is_empty() {
+                entry.revision = entry.revision.wrapping_add(1);
                 self.bump_generation();
             }
         }
+    }
+
+    /// Capture the first drive whose delta reached five percent of its base.
+    pub fn compact_candidate(&self) -> Option<Result<CompactCandidate, String>> {
+        let entry = self
+            .indexes
+            .iter()
+            .find(|entry| entry.index.should_compact())?;
+        let delta_events = entry.index.delta_event_count();
+        let base_records = entry.index.records_len();
+        Some(
+            entry
+                .index
+                .compact_snapshot()
+                .map(|snapshot| CompactCandidate {
+                    drive: entry.letter,
+                    revision: entry.revision,
+                    snapshot,
+                    journal_id: entry.index.status.journal_id,
+                    last_usn: entry.index.status.last_usn,
+                    delta_events,
+                    base_records,
+                })
+                .map_err(|error| error.to_string()),
+        )
+    }
+
+    /// Return whether a compact snapshot still matches the current drive.
+    #[must_use]
+    pub fn compact_revision_matches(&self, drive: char, revision: u64) -> bool {
+        let letter = drive.to_ascii_uppercase();
+        self.indexes
+            .iter()
+            .find(|entry| entry.letter == letter)
+            .is_some_and(|entry| entry.revision == revision)
+    }
+
+    /// Replace a drive only when no USN batch changed it since snapshot capture.
+    pub fn commit_compact(&mut self, drive: char, revision: u64, index: EsIndex) -> bool {
+        let letter = drive.to_ascii_uppercase();
+        let Some(entry) = self.indexes.iter_mut().find(|entry| entry.letter == letter) else {
+            return false;
+        };
+        if entry.revision != revision {
+            return false;
+        }
+        entry.index = index;
+        entry.revision = entry.revision.wrapping_add(1);
+        self.bump_generation();
+        true
     }
 
     /// Search across all loaded indexes.
@@ -141,7 +214,8 @@ impl DriveManager {
         cancel: Option<&AtomicBool>,
     ) -> Vec<easysearch_core::EsSearchResult> {
         let mut all_results = Vec::new();
-        for (_, index) in &self.indexes {
+        for entry in &self.indexes {
+            let index = &entry.index;
             if cancel.is_some_and(|token| token.load(Ordering::Relaxed)) {
                 return Vec::new();
             }
@@ -167,7 +241,9 @@ impl DriveManager {
         let mut drive_candidates = Some(Vec::with_capacity(self.indexes.len()));
         let mut remaining_candidates = max_candidates;
 
-        for (drive, index) in &self.indexes {
+        for entry in &self.indexes {
+            let drive = entry.letter;
+            let index = &entry.index;
             if cancel.load(Ordering::Relaxed) {
                 return CandidateSearchOutput {
                     results: Vec::new(),
@@ -177,7 +253,7 @@ impl DriveManager {
 
             let source_ids = source.and_then(|sets| {
                 sets.iter()
-                    .find(|candidate_set| candidate_set.drive == *drive)
+                    .find(|candidate_set| candidate_set.drive == drive)
                     .map(|candidate_set| candidate_set.ids.as_slice())
             });
             let search = match source_ids {
@@ -200,7 +276,7 @@ impl DriveManager {
             match (&mut drive_candidates, search.candidate_ids) {
                 (Some(sets), Some(ids)) => {
                     remaining_candidates = remaining_candidates.saturating_sub(ids.len());
-                    sets.push(DriveCandidateSet { drive: *drive, ids });
+                    sets.push(DriveCandidateSet { drive, ids });
                 }
                 (_, None) => drive_candidates = None,
                 (None, Some(_)) => {}
@@ -260,7 +336,8 @@ impl DriveManager {
             return Ok(results.unwrap_or_default());
         }
 
-        for (_, index) in &self.indexes {
+        for entry in &self.indexes {
+            let index = &entry.index;
             if cancel.is_some_and(|token| token.load(Ordering::Relaxed)) {
                 return Ok(Vec::new());
             }
@@ -345,7 +422,7 @@ fn build_index_windows(letter: char, cache_dir: Option<&Path>) -> Result<EsIndex
 
     // ── Try hot load from cache (only if the journal id still matches) ────────
     if let Some(dir) = cache_dir {
-        if let Some(volume_serial) = probe_volume_serial(letter) {
+        if let Some(volume_serial) = volume_serial(letter) {
             match read_flow_cache(dir, volume_serial) {
                 Ok(Some(mut cached)) => match query_usn_journal(drive) {
                     Ok(info) => {
@@ -359,16 +436,15 @@ fn build_index_windows(letter: char, cache_dir: Option<&Path>) -> Result<EsIndex
                             // ERROR_JOURNAL_ENTRY_DELETED (1181) on every poll.
                             let cached_usn = uffs_mft::usn::Usn::new(cached.status.last_usn);
                             if cached_usn < info.first_usn {
-                                eprintln!(
-                                    "[easysearch-engine] {letter}: cached cursor too old \
-                                     (last_usn={}, journal first_usn={}). Advancing to next_usn={}.",
+                                easysearch_core::log_warn!(
+                                    "{letter}: cached cursor too old (last_usn={}, journal first_usn={}); advancing to next_usn={}",
                                     cached.status.last_usn,
                                     info.first_usn.raw(),
                                     info.next_usn.raw()
                                 );
                                 cached.status.last_usn = info.next_usn.raw();
                             }
-                            eprintln!(
+                            easysearch_core::log_info!(
                                 "[easysearch-engine] {letter}: loaded from cache (journal_id={}, last_usn={}, records={})",
                                 cached.status.journal_id,
                                 cached.status.last_usn,
@@ -376,13 +452,14 @@ fn build_index_windows(letter: char, cache_dir: Option<&Path>) -> Result<EsIndex
                             );
                             return Ok(cached);
                         }
-                        eprintln!(
+                        easysearch_core::log_warn!(
                             "[easysearch-engine] {letter}: journal id changed (cache {} vs live {}), rebuilding",
-                            cached.status.journal_id, info.journal_id
+                            cached.status.journal_id,
+                            info.journal_id
                         );
                     }
                     Err(e) => {
-                        eprintln!(
+                        easysearch_core::log_warn!(
                             "[easysearch-engine] {letter}: loaded from cache (journal query failed: {e}, using cached journal_id={})",
                             cached.status.journal_id
                         );
@@ -391,7 +468,7 @@ fn build_index_windows(letter: char, cache_dir: Option<&Path>) -> Result<EsIndex
                 },
                 Ok(None) => {}
                 Err(err) => {
-                    eprintln!(
+                    easysearch_core::log_warn!(
                         "[easysearch-engine] cache invalid for {letter}: ({err}) — rebuilding"
                     );
                 }
@@ -400,10 +477,10 @@ fn build_index_windows(letter: char, cache_dir: Option<&Path>) -> Result<EsIndex
     }
 
     // ── Full MFT rebuild ─────────────────────────────────────────────────────
-    eprintln!("[easysearch-engine] {letter}: starting full MFT rebuild...");
+    easysearch_core::log_info!("[easysearch-engine] {letter}: starting full MFT rebuild...");
     let rebuild_start = std::time::Instant::now();
     let mut index = build_index_from_live_mft(letter)?;
-    eprintln!(
+    easysearch_core::log_info!(
         "[easysearch-engine] {letter}: MFT rebuild complete ({} records, {:.2}s)",
         index.records_len(),
         rebuild_start.elapsed().as_secs_f64()
@@ -416,16 +493,20 @@ fn build_index_windows(letter: char, cache_dir: Option<&Path>) -> Result<EsIndex
             index.status.last_usn = info.next_usn.raw();
         }
         Err(err) => {
-            eprintln!("[easysearch-engine] {letter}: query_usn_journal failed: {err}");
+            easysearch_core::log_warn!(
+                "[easysearch-engine] {letter}: query_usn_journal failed: {err}"
+            );
         }
     }
 
     // ── Persist to cache (best-effort, non-fatal) ─────────────────────────────
     if let Some(dir) = cache_dir {
-        if let Some(volume_serial) = probe_volume_serial(letter) {
+        if let Some(volume_serial) = volume_serial(letter) {
             if let Err(err) = write_flow_cache(&index, dir, volume_serial, index.status.journal_id)
             {
-                eprintln!("[easysearch-engine] cache write failed for {letter}: {err}");
+                easysearch_core::log_warn!(
+                    "[easysearch-engine] cache write failed for {letter}: {err}"
+                );
             }
         }
     }
@@ -610,7 +691,7 @@ fn resolve_parent(
 
 /// Read the NTFS volume serial number for the given drive letter.
 #[cfg(windows)]
-fn probe_volume_serial(letter: char) -> Option<u64> {
+pub(crate) fn volume_serial(letter: char) -> Option<u64> {
     use windows::Win32::Storage::FileSystem::GetVolumeInformationW;
     use windows::core::PCWSTR;
 

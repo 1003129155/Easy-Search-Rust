@@ -892,9 +892,12 @@ name = "easysearch-core"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "chrono",
  "dirs",
  "serde",
  "tempfile",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -920,6 +923,7 @@ dependencies = [
  "criterion",
  "crossbeam-channel",
  "dirs-next",
+ "easysearch-core",
  "easysearch-security",
  "hex",
  "hostname",
@@ -953,6 +957,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "dirs-next",
+ "easysearch-core",
  "libc",
  "memmap2",
  "rand 0.10.1",

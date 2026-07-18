@@ -50,7 +50,7 @@ pub(super) fn start_engine(hwnd: HWND) -> Arc<easysearch_engine::SearchEngine> {
             for event in event_rx {
                 let (evt_type, data_ptr) = match event {
                     easysearch_engine::EngineEvent::DriveIndexing { drive } => {
-                        crate::log_write(&format!("[engine] {drive}: indexing started"));
+                        easysearch_core::log_info!("[engine] {drive}: indexing started");
                         let boxed = Box::new(EngineEventPayload::DriveIndexing { drive });
                         (ENGINE_EVT_DRIVE_INDEXING, Box::into_raw(boxed) as isize)
                     }
@@ -59,10 +59,10 @@ pub(super) fn start_engine(hwnd: HWND) -> Arc<easysearch_engine::SearchEngine> {
                         records,
                         elapsed,
                     } => {
-                        crate::log_write(&format!(
+                        easysearch_core::log_info!(
                             "[engine] {drive}: ready ({records} records, {:.2}s)",
                             elapsed.as_secs_f64()
-                        ));
+                        );
                         let boxed = Box::new(EngineEventPayload::DriveReady {
                             drive,
                             records: records as usize,
@@ -71,7 +71,6 @@ pub(super) fn start_engine(hwnd: HWND) -> Arc<easysearch_engine::SearchEngine> {
                         (ENGINE_EVT_DRIVE_READY, Box::into_raw(boxed) as isize)
                     }
                     easysearch_engine::EngineEvent::DriveError { drive, error } => {
-                        crate::log_write(&format!("[engine] {drive}: ERROR - {error}"));
                         let boxed = Box::new(EngineEventPayload::DriveError {
                             drive,
                             error: error.to_string(),
@@ -79,7 +78,7 @@ pub(super) fn start_engine(hwnd: HWND) -> Arc<easysearch_engine::SearchEngine> {
                         (ENGINE_EVT_DRIVE_ERROR, Box::into_raw(boxed) as isize)
                     }
                     easysearch_engine::EngineEvent::AllReady => {
-                        crate::log_write("[engine] all drives ready, USN polling active");
+                        easysearch_core::log_info!("[engine] all drives ready, USN polling active");
                         (ENGINE_EVT_ALL_READY, 0)
                     }
                     easysearch_engine::EngineEvent::Shutdown => break,
@@ -88,14 +87,13 @@ pub(super) fn start_engine(hwnd: HWND) -> Arc<easysearch_engine::SearchEngine> {
                         events_applied,
                     } => {
                         if events_applied > 0 {
-                            crate::log_write(&format!(
+                            easysearch_core::log_debug!(
                                 "[engine] {drive}: USN update applied {events_applied} events"
-                            ));
+                            );
                         }
                         continue;
                     }
-                    easysearch_engine::EngineEvent::Log { message } => {
-                        crate::log_write(&message);
+                    easysearch_engine::EngineEvent::Log { .. } => {
                         continue;
                     }
                     _ => continue, // DriveAdded, DriveRemoved — skip for UI

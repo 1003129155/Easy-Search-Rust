@@ -32,6 +32,8 @@ pub(super) enum KeyCommand {
     SelectDown,
     /// Execute the currently selected item.
     Execute,
+    /// Select and execute a result by its zero-based Alt+number index.
+    ExecuteIndex(usize),
     /// Open the containing folder (Ctrl+Enter).
     OpenFolder,
     /// Open context actions for the selected item (Shift+Enter, Ctrl+O, Right).
@@ -110,6 +112,14 @@ pub(super) fn decode_key_command(
                 KeyCommand::Hide
             }
         }
+        v if alt
+            && !ctrl
+            && !shift
+            && (0x31..=0x39).contains(&v)
+            && view_mode == ViewMode::Results =>
+        {
+            KeyCommand::ExecuteIndex((v - 0x31) as usize)
+        }
         v if v == VK_RETURN.0 && is_hint && input_empty && view_mode == ViewMode::Results => {
             // Enter on a home-screen hint item: fill keyword into input
             KeyCommand::FillHint
@@ -174,10 +184,7 @@ pub(super) fn decode_key_command(
 /// Returns a [`DeferredAction`] that the caller must process *after* the
 /// borrow is released.
 #[cfg(windows)]
-pub(super) fn execute_key_command(
-    app: &mut AppState,
-    cmd: KeyCommand,
-) -> DeferredAction {
+pub(super) fn execute_key_command(app: &mut AppState, cmd: KeyCommand) -> DeferredAction {
     let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
 
     match cmd {
@@ -232,6 +239,15 @@ pub(super) fn execute_key_command(
             DeferredAction::None
         }
         KeyCommand::Execute => DeferredAction::Execute,
+        KeyCommand::ExecuteIndex(index) => {
+            if index >= app.items.len() {
+                return DeferredAction::None;
+            }
+            app.selected_index = index;
+            app.result_selected_index = index;
+            app.input_focused = false;
+            DeferredAction::Execute
+        }
         KeyCommand::OpenFolder => DeferredAction::OpenFolder,
         KeyCommand::OpenContext => DeferredAction::OpenContext,
         KeyCommand::CloseContext => DeferredAction::CloseContext,
@@ -322,7 +338,6 @@ pub(super) fn execute_key_command(
         KeyCommand::None => DeferredAction::None,
     }
 }
-
 
 /// Get current time in milliseconds since UNIX epoch.
 #[cfg(windows)]
