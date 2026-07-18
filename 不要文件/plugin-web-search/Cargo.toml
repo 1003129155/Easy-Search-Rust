@@ -1,9 +1,0 @@
-[package]
-name = "plugin-web-search"
-version = "0.1.0"
-edition = "2024"
-license = "MIT"
-publish = false
-
-[dependencies]
-easysearch-core = { path = "../../easysearch-core" }

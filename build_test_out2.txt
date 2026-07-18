@@ -1,3 +1,0 @@
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
-  Executable unittests src\lib.rs (target\debug\deps\easysearch_engine-46d9883ad1ab1fd8.exe)
-  Executable tests\integration.rs (target\debug\deps\integration-b963d3c36dc9ee91.exe)
