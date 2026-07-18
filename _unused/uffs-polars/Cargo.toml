@@ -1,0 +1,23 @@
+[package]
+name = "uffs-polars"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+publish = false
+
+[lib]
+doctest = false
+test = false
+
+[dependencies]
+polars = { version = "0.54.4", default-features = false, features = [
+    "lazy", "streaming", "performant", "serde", "nightly", "simd",
+    "dtype-u8", "dtype-u16", "dtype-datetime", "dtype-array",
+    "strings", "regex", "find_many",
+    "temporal", "timezones",
+    "parquet", "json", "csv",
+    "is_in", "diff", "bitwise", "abs", "fmt",
+] }
+
+[lints.clippy]
+all = "allow"
