@@ -7,7 +7,7 @@
 .vscode/
 *.swp
 *.swo
-
+.kiro/
 # OS
 Thumbs.db
 .DS_Store
@@ -25,3 +25,5 @@ AGENTS.md
 
 # Abandoned plugins
 /不要文件/
+
+/.kiro/
