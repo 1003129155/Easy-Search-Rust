@@ -43,23 +43,20 @@ pub(super) fn execute_selected_safe() {
             item.clone()
         };
         let history_key = action_to_history_key_static(&history_item.action);
-        if app.view_mode == ViewMode::Results {
-            let icon = history_item
-                .icon_path
-                .as_deref()
-                .unwrap_or(&history_item.icon);
-            app.history.record_full(
-                &history_key,
-                &history_item.title,
-                &history_item.subtitle,
-                icon,
-                history_item.is_directory,
-            );
-        } else {
-            // Context actions affect usage ranking, but do not create a new
-            // recent-item entry. The recorded key belongs to the source item.
-            app.history.record(&history_key);
-        }
+        // A context action counts as using the source result, just like pressing
+        // Enter on it. Persist the full source metadata so it appears on the
+        // home-screen recent-items list.
+        let icon = history_item
+            .icon_path
+            .as_deref()
+            .unwrap_or(&history_item.icon);
+        app.history.record_full(
+            &history_key,
+            &history_item.title,
+            &history_item.subtitle,
+            icon,
+            history_item.is_directory,
+        );
         app.history.save();
 
         Some(item)
@@ -94,24 +91,20 @@ pub(super) fn open_folder_or_containing_safe() {
         }?;
 
         // Ctrl+Enter also operates on the selected object. Record the source
-        // object rather than the context action, without adding context actions
-        // to the home-screen recent-items list.
+        // object rather than the context action, with the same recent-item
+        // metadata as a normal Enter execution.
         let history_key = action_to_history_key_static(&source_item.action);
-        if app.view_mode == ViewMode::Results {
-            let icon = source_item
-                .icon_path
-                .as_deref()
-                .unwrap_or(&source_item.icon);
-            app.history.record_full(
-                &history_key,
-                &source_item.title,
-                &source_item.subtitle,
-                icon,
-                source_item.is_directory,
-            );
-        } else {
-            app.history.record(&history_key);
-        }
+        let icon = source_item
+            .icon_path
+            .as_deref()
+            .unwrap_or(&source_item.icon);
+        app.history.record_full(
+            &history_key,
+            &source_item.title,
+            &source_item.subtitle,
+            icon,
+            source_item.is_directory,
+        );
         app.history.save();
 
         let is_dir = source_item

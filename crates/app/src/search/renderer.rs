@@ -175,6 +175,19 @@ impl Renderer {
         }
     }
 
+    /// Keep Direct2D's DIP-to-pixel mapping in sync with the HWND.
+    ///
+    /// Resizing the render target alone does not update its DPI. Without this,
+    /// a live Windows scale change (for example 100% -> 125%) enlarges the
+    /// window but Direct2D continues drawing at the old scale.
+    pub fn set_dpi(&mut self, dpi_x: u32, dpi_y: u32) {
+        if let Some(ref rt) = self.render_target {
+            unsafe {
+                rt.SetDpi(dpi_x as f32, dpi_y as f32);
+            }
+        }
+    }
+
     /// Render the full search UI.
     pub fn render(
         &self,
@@ -184,6 +197,7 @@ impl Renderer {
         has_selection: bool,
         items: &[DisplayItem],
         selected_index: usize,
+        scroll_offset: usize,
         placeholder: &str,
         icon_cache: &mut super::icon::IconCache,
         anim_progress: f32,
@@ -315,20 +329,10 @@ impl Renderer {
                 self.draw_search_progress(rt, anim_progress);
             }
 
-            // Draw result items with scroll offset
-            // Calculate which items are visible based on selected_index
+            // Draw result items with the viewport maintained by the window.
             let total_items = items.len();
             let max_visible = layout::MAX_VISIBLE_ITEMS;
-            let clamped_selected = if input_focused {
-                0
-            } else {
-                selected_index.min(total_items.saturating_sub(1))
-            };
-            let scroll_offset = if clamped_selected >= max_visible {
-                clamped_selected - max_visible + 1
-            } else {
-                0
-            };
+            let scroll_offset = scroll_offset.min(total_items.saturating_sub(max_visible));
             let visible_start = scroll_offset;
             let visible_end = (scroll_offset + max_visible).min(total_items);
             let visible_count = visible_end - visible_start;
@@ -516,11 +520,8 @@ impl Renderer {
                 // Thumb size and position
                 let thumb_ratio = max_visible as f32 / total_items as f32;
                 let thumb_height = (track_height * thumb_ratio).max(20.0);
-                let scroll_ratio = if total_items > 1 {
-                    clamped_selected as f32 / (total_items - 1) as f32
-                } else {
-                    0.0
-                };
+                let scroll_ratio =
+                    scroll_offset as f32 / total_items.saturating_sub(max_visible) as f32;
                 let thumb_top = track_top + scroll_ratio * (track_height - thumb_height);
 
                 // Draw track (very faint)

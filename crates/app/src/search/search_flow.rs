@@ -24,6 +24,7 @@ pub(super) fn on_input_changed(app: &mut AppState) {
     let query = app.input.text().to_string();
     app.view_mode = ViewMode::Results;
     app.selected_index = 0;
+    app.scroll_offset = 0;
     app.result_selected_index = 0;
     app.context_items.clear();
     app.context_selected_index = 0;

@@ -59,6 +59,12 @@ pub(super) fn do_render() {
             None
         };
 
+        // Selection and viewport are independent. Keyboard navigation updates
+        // both; mouse-wheel scrolling updates only the viewport.
+        app.scroll_offset = app
+            .scroll_offset
+            .min(app.items.len().saturating_sub(layout::MAX_VISIBLE_ITEMS));
+
         app.renderer.render(
             app.input.text(),
             app.input.cursor(),
@@ -74,6 +80,7 @@ pub(super) fn do_render() {
             } else {
                 app.selected_index
             },
+            app.scroll_offset,
             placeholder,
             &mut app.icon_cache,
             anim_progress,

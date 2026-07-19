@@ -6,7 +6,7 @@
 #[cfg(windows)]
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 #[cfg(windows)]
-use windows::Win32::Graphics::Gdi::ValidateRect;
+use windows::Win32::Graphics::Gdi::{ScreenToClient, ValidateRect};
 #[cfg(windows)]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 #[cfg(windows)]
@@ -124,6 +124,8 @@ pub fn run() -> Result<(), String> {
     let mut renderer = Renderer::new()?;
     easysearch_core::log_debug!("Renderer created");
     renderer.create_render_target(hwnd, actual_width as u32, actual_height as u32)?;
+    let initial_dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) };
+    renderer.set_dpi(initial_dpi, initial_dpi);
     easysearch_core::log_debug!("Render target created");
 
     // Apply DWM window styling (Win11 round corners + shadow)
@@ -171,6 +173,7 @@ pub fn run() -> Result<(), String> {
         view_mode: ViewMode::Results,
         items: Vec::new(),
         selected_index: 0,
+        scroll_offset: 0,
         result_items: Vec::new(),
         result_selected_index: 0,
         context_items: Vec::new(),
@@ -204,6 +207,7 @@ pub fn run() -> Result<(), String> {
         pending_ime_char_suppression: 0,
         input_focused: true,
         cursor_moved_at: 0,
+        wheel_delta_remainder: 0,
     });
 
     // Start settings poll timer
@@ -264,6 +268,7 @@ pub(super) fn open_context_actions(app: &mut AppState) -> bool {
     app.context_source_index = Some(index);
     app.context_items = context_items;
     app.context_selected_index = 0;
+    app.scroll_offset = 0;
     app.view_mode = ViewMode::ContextActions;
 
     // Start async preview loading for the source item
@@ -294,6 +299,9 @@ pub(super) fn open_context_actions(app: &mut AppState) -> bool {
     }
 
     sync_active_items(app);
+    app.scroll_offset = app
+        .selected_index
+        .saturating_sub(layout::MAX_VISIBLE_ITEMS - 1);
     resize_for_results(app);
     true
 }
@@ -312,6 +320,9 @@ fn close_context_actions(app: &mut AppState) -> bool {
     app.preview = None;
     app.preview_seq += 1;
     sync_active_items(app);
+    app.scroll_offset = app
+        .selected_index
+        .saturating_sub(layout::MAX_VISIBLE_ITEMS - 1);
     resize_for_results(app);
     true
 }
@@ -335,20 +346,26 @@ fn item_index_from_client_point(app: &AppState, x: i32, y: i32) -> Option<usize>
         return None;
     }
 
-    let list_top =
-        (layout::SEARCH_BAR_HEIGHT + layout::SEPARATOR_HEIGHT + layout::RESULT_MARGIN_V) as i32;
+    // Mouse messages use physical client pixels, while the renderer and layout
+    // constants use device-independent pixels.
+    let dpi_scale = layout::dpi_scale(app.hwnd);
+    let x = x as f32 / dpi_scale;
+    let y = y as f32 / dpi_scale;
+    if x >= layout::WINDOW_WIDTH {
+        return None;
+    }
+
+    let list_top = layout::SEARCH_BAR_HEIGHT + layout::SEPARATOR_HEIGHT + layout::RESULT_MARGIN_V;
     if y < list_top {
         return None;
     }
 
-    let row = ((y - list_top) as f32 / layout::ITEM_HEIGHT).floor() as usize;
+    let row = ((y - list_top) / layout::ITEM_HEIGHT).floor() as usize;
     let total_items = app.items.len();
     let max_visible = layout::MAX_VISIBLE_ITEMS;
-    let scroll_offset = if app.selected_index >= max_visible {
-        app.selected_index - max_visible + 1
-    } else {
-        0
-    };
+    let scroll_offset = app
+        .scroll_offset
+        .min(total_items.saturating_sub(max_visible));
     let visible_end = (scroll_offset + max_visible).min(total_items);
     let visible_count = visible_end.saturating_sub(scroll_offset);
 
@@ -364,18 +381,20 @@ fn selected_item_screen_point(app: &AppState) -> POINT {
     let mut rect = RECT::default();
     let _ = unsafe { GetWindowRect(app.hwnd, &mut rect) };
 
+    let dpi = layout::dpi_scale(app.hwnd);
     let max_visible = layout::MAX_VISIBLE_ITEMS;
-    let scroll_offset = if app.selected_index >= max_visible {
-        app.selected_index - max_visible + 1
-    } else {
-        0
-    };
+    let scroll_offset = app
+        .scroll_offset
+        .min(app.items.len().saturating_sub(max_visible));
     let visible_row = app.selected_index.saturating_sub(scroll_offset);
     let y = rect.top
-        + (layout::SEARCH_BAR_HEIGHT + layout::SEPARATOR_HEIGHT + layout::RESULT_MARGIN_V) as i32
-        + visible_row as i32 * layout::ITEM_HEIGHT as i32
-        + (layout::ITEM_HEIGHT as i32 / 2);
-    let x = rect.left + layout::WINDOW_WIDTH as i32 - 24;
+        + layout::scale_with(
+            layout::SEARCH_BAR_HEIGHT + layout::SEPARATOR_HEIGHT + layout::RESULT_MARGIN_V,
+            dpi,
+        )
+        + visible_row as i32 * layout::scale_with(layout::ITEM_HEIGHT, dpi)
+        + layout::scale_with(layout::ITEM_HEIGHT / 2.0, dpi);
+    let x = rect.left + layout::scale_with(layout::WINDOW_WIDTH - 24.0, dpi);
 
     POINT { x, y }
 }
@@ -438,7 +457,10 @@ fn position_ime_windows(hwnd: HWND, caret_x: i32, _caret_y: i32) {
 
         // Composition window: force the position so the IME cannot relocate it.
         // Position at caret_x, vertically at the text baseline within the search bar.
-        let comp_y = (layout::SEARCH_BAR_HEIGHT as i32 - 22) / 2; // text vertical center
+        let dpi = layout::dpi_scale(hwnd);
+        let caret_x = layout::scale_with(caret_x as f32, dpi);
+        let comp_y = layout::scale_with((layout::SEARCH_BAR_HEIGHT - 22.0) / 2.0, dpi);
+        let search_bar_bottom = layout::scale_with(layout::SEARCH_BAR_HEIGHT, dpi);
         let mut cf = COMPOSITIONFORM {
             dwStyle: CFS_POINT | CFS_FORCE_POSITION,
             ptCurrentPos: POINT {
@@ -463,7 +485,7 @@ fn position_ime_windows(hwnd: HWND, caret_x: i32, _caret_y: i32) {
                 left: caret_x.saturating_sub(2),
                 top: 0,
                 right: caret_x + 2,
-                bottom: layout::SEARCH_BAR_HEIGHT as i32, // exclude the entire search bar
+                bottom: search_bar_bottom, // exclude the entire search bar
             },
         };
         let _ = ImmSetCandidateWindow(himc, &mut cand);
@@ -815,17 +837,19 @@ unsafe extern "system" fn wnd_proc(
         WM_DPICHANGED => {
             // lparam contains a pointer to a RECT with the suggested new position
             let suggested_rect = unsafe { &*(lparam.0 as *const RECT) };
+            let dpi_x = (wparam.0 as u32) & 0xFFFF;
+            let dpi_y = ((wparam.0 as u32) >> 16) & 0xFFFF;
+            let dpi_factor = dpi_x as f32 / 96.0;
 
-            // Recalculate window size using the new DPI (GetDpiForWindow will
-            // already reflect the new DPI when WM_DPICHANGED is received).
+            // Use the DPI carried by the message. This avoids depending on when
+            // GetDpiForWindow starts reporting the new value during dispatch.
             app_state::with_app_mut(|app| {
                 let has_preview =
                     app.preview.is_some() && app.view_mode == ViewMode::ContextActions;
-                let new_width = layout::window_width_scaled(app.hwnd);
-                let new_height = layout::window_height_with_preview_scaled(
-                    app.items.len(),
-                    has_preview,
-                    app.hwnd,
+                let new_width = layout::scale_with(layout::WINDOW_WIDTH, dpi_factor);
+                let new_height = layout::scale_with(
+                    layout::window_height_with_preview(app.items.len(), has_preview),
+                    dpi_factor,
                 );
 
                 // Use suggested position from Windows, but our own calculated size
@@ -841,10 +865,16 @@ unsafe extern "system" fn wnd_proc(
                     );
                 }
 
+                // SetDpi is the essential part of a live scale change. Resize()
+                // only changes the backing pixel dimensions and otherwise leaves
+                // Direct2D drawing with the old DIP-to-pixel conversion.
+                app.renderer.set_dpi(dpi_x, dpi_y);
                 app.renderer.resize(new_width as u32, new_height as u32);
+                app.last_window_size = (new_width, new_height);
                 easysearch_core::log_debug!(
-                    "WM_DPICHANGED: dpi_scale={:.2}, resized to {}x{}",
-                    layout::dpi_scale(app.hwnd),
+                    "WM_DPICHANGED: dpi={}x{}, resized to {}x{}",
+                    dpi_x,
+                    dpi_y,
                     new_width,
                     new_height
                 );
@@ -907,6 +937,14 @@ unsafe extern "system" fn wnd_proc(
                 app.input_focused = false;
                 if is_right_click && app.view_mode == ViewMode::Results {
                     2
+                } else if app.view_mode == ViewMode::Results
+                    && app.input.text().trim().is_empty()
+                    && matches!(app.items[index].action, easysearch_core::Action::None)
+                {
+                    // Home-screen plugin hints are navigation entries rather
+                    // than executable actions. A mouse click should mirror
+                    // pressing Enter and put that keyword into the input.
+                    3
                 } else {
                     1
                 }
@@ -920,10 +958,83 @@ unsafe extern "system" fn wnd_proc(
                         let _ = open_context_actions(app);
                     });
                 }
+                3 => {
+                    app_state::with_app_mut(|app| {
+                        let _ = super::key_command::execute_key_command(
+                            app,
+                            super::key_command::KeyCommand::FillHint,
+                        );
+                        app.input_focused = true;
+                    });
+                }
                 _ => {}
             }
 
             do_render();
+            LRESULT(0)
+        }
+
+        WM_MOUSEMOVE => {
+            let x = (lparam.0 as i16) as i32;
+            let y = ((lparam.0 >> 16) as i16) as i32;
+            let changed = app_state::with_app_mut(|app| {
+                let Some(index) = item_index_from_client_point(app, x, y) else {
+                    return false;
+                };
+                if app.selected_index == index && !app.input_focused {
+                    return false;
+                }
+
+                set_active_selection(app, index);
+                app.input_focused = false;
+                true
+            })
+            .unwrap_or(false);
+
+            if changed {
+                do_render();
+            }
+            LRESULT(0)
+        }
+
+        WM_MOUSEWHEEL => {
+            // WM_MOUSEWHEEL carries screen coordinates, unlike button/move
+            // messages. Only scroll when the pointer is over a visible item.
+            let mut point = POINT {
+                x: (lparam.0 as i16) as i32,
+                y: ((lparam.0 >> 16) as i16) as i32,
+            };
+            let _ = unsafe { ScreenToClient(hwnd, &mut point) };
+            let delta = ((wparam.0 >> 16) as i16) as i32;
+
+            let changed = app_state::with_app_mut(|app| {
+                if item_index_from_client_point(app, point.x, point.y).is_none() {
+                    return false;
+                }
+
+                app.wheel_delta_remainder += delta;
+                let steps = app.wheel_delta_remainder / WHEEL_DELTA as i32;
+                app.wheel_delta_remainder %= WHEEL_DELTA as i32;
+                if steps == 0 || app.items.is_empty() {
+                    return false;
+                }
+
+                // Positive wheel delta scrolls the viewport up. Selection is
+                // controlled independently by the pointer position.
+                let old_offset = app.scroll_offset;
+                let max_offset = app.items.len().saturating_sub(layout::MAX_VISIBLE_ITEMS);
+                app.scroll_offset = if steps > 0 {
+                    old_offset.saturating_sub(steps as usize)
+                } else {
+                    old_offset.saturating_add((-steps) as usize).min(max_offset)
+                };
+                old_offset != app.scroll_offset
+            })
+            .unwrap_or(false);
+
+            if changed {
+                do_render();
+            }
             LRESULT(0)
         }
 

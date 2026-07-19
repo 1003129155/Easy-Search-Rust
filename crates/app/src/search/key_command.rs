@@ -206,6 +206,7 @@ pub(super) fn execute_key_command(app: &mut AppState, cmd: KeyCommand) -> Deferr
                     app.context_selected_index = app.selected_index;
                 }
             }
+            keep_selection_visible(app);
             DeferredAction::None
         }
         KeyCommand::SelectDown => {
@@ -236,6 +237,7 @@ pub(super) fn execute_key_command(app: &mut AppState, cmd: KeyCommand) -> Deferr
                     }
                 }
             }
+            keep_selection_visible(app);
             DeferredAction::None
         }
         KeyCommand::Execute => DeferredAction::Execute,
@@ -337,6 +339,19 @@ pub(super) fn execute_key_command(app: &mut AppState, cmd: KeyCommand) -> Deferr
         }
         KeyCommand::None => DeferredAction::None,
     }
+}
+
+#[cfg(windows)]
+fn keep_selection_visible(app: &mut AppState) {
+    let max_visible = super::layout::MAX_VISIBLE_ITEMS;
+    if app.selected_index < app.scroll_offset {
+        app.scroll_offset = app.selected_index;
+    } else if app.selected_index >= app.scroll_offset + max_visible {
+        app.scroll_offset = app.selected_index - max_visible + 1;
+    }
+    app.scroll_offset = app
+        .scroll_offset
+        .min(app.items.len().saturating_sub(max_visible));
 }
 
 /// Get current time in milliseconds since UNIX epoch.

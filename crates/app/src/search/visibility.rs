@@ -60,6 +60,7 @@ pub(super) fn show_window_safe(hwnd: HWND) {
                 build_home_screen(&app.history, &app.plugin_router, app.i18n.current_locale());
             app.plugin_items.clear();
             app.result_selected_index = 0;
+            app.scroll_offset = 0;
             super::window::sync_active_items(app);
             app.anim_frame = ANIM_TOTAL_FRAMES;
         }
@@ -275,6 +276,7 @@ fn clear_hidden_state(app: &mut super::app_state::AppState) -> HWND {
     app.preview = None;
     app.preview_seq += 1;
     app.selected_index = 0;
+    app.scroll_offset = 0;
     app.result_selected_index = 0;
     app.context_selected_index = 0;
     app.context_source_index = None;
@@ -391,6 +393,7 @@ pub(super) fn hide_window_inner(app: &mut super::app_state::AppState) {
     app.preview = None;
     app.preview_seq += 1;
     app.selected_index = 0;
+    app.scroll_offset = 0;
     app.result_selected_index = 0;
     app.context_selected_index = 0;
     app.context_source_index = None;

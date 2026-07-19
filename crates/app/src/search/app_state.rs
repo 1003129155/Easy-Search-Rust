@@ -52,6 +52,8 @@ pub(super) struct AppState {
     pub(super) view_mode: ViewMode,
     pub(super) items: Vec<DisplayItem>,
     pub(super) selected_index: usize,
+    /// First item currently shown in the result viewport.
+    pub(super) scroll_offset: usize,
     pub(super) result_items: Vec<DisplayItem>,
     pub(super) result_selected_index: usize,
     pub(super) context_items: Vec<DisplayItem>,
@@ -99,6 +101,9 @@ pub(super) struct AppState {
     /// Timestamp (millis since epoch) when the cursor was last moved,
     /// used to keep the cursor visible immediately after movement.
     pub(super) cursor_moved_at: u128,
+    /// Accumulated high-resolution mouse-wheel delta.  Touchpads and some
+    /// mice send values smaller than one standard `WHEEL_DELTA` notch.
+    pub(super) wheel_delta_remainder: i32,
 }
 
 // ─── Thread-local storage ───────────────────────────────────────────────────
