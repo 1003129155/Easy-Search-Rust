@@ -6,9 +6,9 @@
 #[cfg(windows)]
 use std::time::Instant;
 
+use polars::prelude::DataFrame;
 #[cfg(windows)]
 use tracing::{debug, info, warn};
-use polars::prelude::DataFrame;
 
 #[cfg(windows)]
 use super::MftReadMode;

@@ -85,7 +85,10 @@ impl core::fmt::Display for EsError {
                 write!(f, "record index {index} is outside records length {len}")
             }
             Self::InvalidNameRange { index, offset, len } => {
-                write!(f, "record {index} has invalid name range offset={offset} len={len}")
+                write!(
+                    f,
+                    "record {index} has invalid name range offset={offset} len={len}"
+                )
             }
             Self::InvalidNameUtf8(e) => write!(f, "record name is not valid UTF-8: {e}"),
             Self::PathNotFound { path } => write!(f, "path not found in index: {path}"),
@@ -96,7 +99,10 @@ impl core::fmt::Display for EsError {
                 write!(f, "filename is too long for EsRecord name_len: {len} bytes")
             }
             Self::NamesBlobTooLarge { len } => {
-                write!(f, "names blob is too large for EsRecord name_offset: {len} bytes")
+                write!(
+                    f,
+                    "names blob is too large for EsRecord name_offset: {len} bytes"
+                )
             }
             Self::RecordCountTooLarge { len } => {
                 write!(f, "record count is too large for u32 indices: {len}")

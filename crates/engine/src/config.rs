@@ -90,11 +90,7 @@ fn detect_all_fixed_drives() -> Vec<char> {
         }
     }
 
-    if drives.is_empty() {
-        vec!['C']
-    } else {
-        drives
-    }
+    if drives.is_empty() { vec!['C'] } else { drives }
 }
 
 #[cfg(not(windows))]

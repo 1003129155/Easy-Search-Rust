@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use easysearch_core::{Action, ContextAction, ContextData, Plugin, PluginResult};
-use quick_launch_store::{global_store, QuickLaunchItem};
+use quick_launch_store::{QuickLaunchItem, global_store};
 
 pub struct QuickLaunchPlugin {
     max_results: usize,
@@ -34,7 +34,11 @@ impl Plugin for QuickLaunchPlugin {
         let items: Vec<&QuickLaunchItem> = if query.trim().is_empty() {
             store.all().iter().take(self.max_results).collect()
         } else {
-            store.search(query).into_iter().take(self.max_results).collect()
+            store
+                .search(query)
+                .into_iter()
+                .take(self.max_results)
+                .collect()
         };
 
         items

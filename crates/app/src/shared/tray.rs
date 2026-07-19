@@ -5,13 +5,15 @@
 #[cfg(windows)]
 use windows::Win32::Foundation::HWND;
 #[cfg(windows)]
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+#[cfg(windows)]
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 #[cfg(windows)]
-use windows::Win32::UI::WindowsAndMessaging::{LoadIconW, LoadImageW, IDI_APPLICATION, IMAGE_ICON, LR_DEFAULTSIZE, LR_SHARED};
-#[cfg(windows)]
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::WindowsAndMessaging::{
+    IDI_APPLICATION, IMAGE_ICON, LR_DEFAULTSIZE, LR_SHARED, LoadIconW, LoadImageW,
+};
 #[cfg(windows)]
 use windows::core::PCWSTR;
 
@@ -33,7 +35,8 @@ pub fn load_app_icon() -> windows::Win32::UI::WindowsAndMessaging::HICON {
             Some(hinstance.into()),
             icon_id,
             IMAGE_ICON,
-            0, 0,
+            0,
+            0,
             LR_DEFAULTSIZE | LR_SHARED,
         );
         match hicon {

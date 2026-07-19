@@ -57,7 +57,8 @@ pub fn fuzzy_score(query: &str, target: &str) -> u32 {
 /// Check if query matches at word boundaries in target.
 /// E.g., "wc" matches "Windows Calculator" (W + C).
 fn word_start_match(query: &str, target: &str) -> bool {
-    let words: Vec<&str> = target.split(|c: char| c == ' ' || c == '-' || c == '_' || c == '.')
+    let words: Vec<&str> = target
+        .split(|c: char| c == ' ' || c == '-' || c == '_' || c == '.')
         .filter(|w| !w.is_empty())
         .collect();
 
@@ -73,7 +74,7 @@ fn word_start_match(query: &str, target: &str) -> bool {
                 Some(&qc) if qc == ch => {
                     query_chars.next();
                 }
-                Some(_) => break, // move to next word
+                Some(_) => break,    // move to next word
                 None => return true, // consumed all query chars
             }
         }
@@ -95,10 +96,7 @@ fn initials_match(query: &str, target: &str) -> bool {
         return false;
     }
 
-    query
-        .chars()
-        .zip(initials.iter())
-        .all(|(q, &i)| q == i)
+    query.chars().zip(initials.iter()).all(|(q, &i)| q == i)
 }
 
 /// Check if query is a subsequence of target.

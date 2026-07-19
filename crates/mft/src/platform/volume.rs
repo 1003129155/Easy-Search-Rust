@@ -1434,20 +1434,26 @@ mod tests {
     fn classify_wait_error_maps_aborted_waits_to_cancelled() {
         let error = classify_wait_error_code("read_all_index", 995, "wait aborted");
 
-        assert!(matches!(error, MftError::Cancelled {
-            operation: "read_all_index",
-            ..
-        }));
+        assert!(matches!(
+            error,
+            MftError::Cancelled {
+                operation: "read_all_index",
+                ..
+            }
+        ));
     }
 
     #[test]
     fn classify_wait_error_maps_other_wait_failures_to_wait_failed() {
         let error = classify_wait_error_code("read_all_index", 123, "wait failed");
 
-        assert!(matches!(error, MftError::WaitFailed {
-            operation: "read_all_index",
-            ..
-        }));
+        assert!(matches!(
+            error,
+            MftError::WaitFailed {
+                operation: "read_all_index",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1458,10 +1464,13 @@ mod tests {
             "no completions arrived",
         );
 
-        assert!(matches!(error, MftError::Timeout {
-            operation: "read_all_index",
-            ..
-        }));
+        assert!(matches!(
+            error,
+            MftError::Timeout {
+                operation: "read_all_index",
+                ..
+            }
+        ));
     }
 
     // ── hresult_to_io_error regression tests ─────────────────────────────

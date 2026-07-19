@@ -15,21 +15,30 @@ use crate::search::{fold::fold_text, score_name};
 
 #[test]
 fn tombstone_flag_detected() {
-    let r = EsRecord { flags: flags::TOMBSTONE, ..Default::default() };
+    let r = EsRecord {
+        flags: flags::TOMBSTONE,
+        ..Default::default()
+    };
     assert!(r.is_tombstone());
     assert!(!r.is_directory());
 }
 
 #[test]
 fn hidden_system_flags_dont_affect_dir_or_tombstone() {
-    let r = EsRecord { flags: flags::HIDDEN | flags::SYSTEM, ..Default::default() };
+    let r = EsRecord {
+        flags: flags::HIDDEN | flags::SYSTEM,
+        ..Default::default()
+    };
     assert!(!r.is_directory());
     assert!(!r.is_tombstone());
 }
 
 #[test]
 fn dir_and_tombstone_flags_can_coexist() {
-    let r = EsRecord { flags: flags::DIRECTORY | flags::TOMBSTONE, ..Default::default() };
+    let r = EsRecord {
+        flags: flags::DIRECTORY | flags::TOMBSTONE,
+        ..Default::default()
+    };
     assert!(r.is_directory());
     assert!(r.is_tombstone());
 }
@@ -86,11 +95,13 @@ fn normalize_converts_forward_slashes() {
 #[test]
 fn builder_produces_correct_children_csr() {
     let mut b = EsIndexBuilder::new();
-    let root = b.add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0).unwrap();
+    let root = b
+        .add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0)
+        .unwrap();
     let users = b.add_record(2, root, "Users", flags::DIRECTORY, 1).unwrap();
-    let docs  = b.add_record(3, root, "docs", flags::DIRECTORY, 1).unwrap();
-    let f1    = b.add_record(4, users, "a.txt", 0, 2).unwrap();
-    let idx   = b.finish().unwrap();
+    let docs = b.add_record(3, root, "docs", flags::DIRECTORY, 1).unwrap();
+    let f1 = b.add_record(4, users, "a.txt", 0, 2).unwrap();
+    let idx = b.finish().unwrap();
     let root_children = idx.children(root).unwrap();
     assert!(root_children.contains(&users));
     assert!(root_children.contains(&docs));
@@ -102,7 +113,9 @@ fn builder_produces_correct_children_csr() {
 #[test]
 fn builder_leaf_has_no_children() {
     let mut b = EsIndexBuilder::new();
-    let root = b.add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0).unwrap();
+    let root = b
+        .add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0)
+        .unwrap();
     let f = b.add_record(2, root, "x.txt", 0, 1).unwrap();
     let idx = b.finish().unwrap();
     assert_eq!(idx.children(f).unwrap(), &[] as &[u32]);
@@ -111,7 +124,9 @@ fn builder_leaf_has_no_children() {
 #[test]
 fn path_from_idx_single_root() {
     let mut b = EsIndexBuilder::new();
-    let root = b.add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0).unwrap();
+    let root = b
+        .add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0)
+        .unwrap();
     let idx = b.finish().unwrap();
     assert_eq!(idx.path_from_idx(root).unwrap(), r"C:\");
 }
@@ -119,12 +134,19 @@ fn path_from_idx_single_root() {
 #[test]
 fn path_from_idx_three_levels_deep() {
     let mut b = EsIndexBuilder::new();
-    let root = b.add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0).unwrap();
+    let root = b
+        .add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0)
+        .unwrap();
     let users = b.add_record(2, root, "Users", flags::DIRECTORY, 1).unwrap();
-    let admin = b.add_record(3, users, "Admin", flags::DIRECTORY, 2).unwrap();
-    let file  = b.add_record(4, admin, "readme.txt", 0, 3).unwrap();
-    let idx   = b.finish().unwrap();
-    assert_eq!(idx.path_from_idx(file).unwrap(), r"C:\Users\Admin\readme.txt");
+    let admin = b
+        .add_record(3, users, "Admin", flags::DIRECTORY, 2)
+        .unwrap();
+    let file = b.add_record(4, admin, "readme.txt", 0, 3).unwrap();
+    let idx = b.finish().unwrap();
+    assert_eq!(
+        idx.path_from_idx(file).unwrap(),
+        r"C:\Users\Admin\readme.txt"
+    );
 }
 
 // ─── FileRefMap ───────────────────────────────────────────────────────────────
@@ -176,9 +198,9 @@ fn file_ref_map_sparse_falls_back_to_sorted() {
 
 #[test]
 fn score_exact_gt_prefix_gt_substring() {
-    let exact     = score_name("abc", "abc",    false).unwrap().0;
-    let prefix    = score_name("abc", "abcdef", false).unwrap().0;
-    let substring = score_name("abc", "xabcx",  false).unwrap().0;
+    let exact = score_name("abc", "abc", false).unwrap().0;
+    let prefix = score_name("abc", "abcdef", false).unwrap().0;
+    let substring = score_name("abc", "xabcx", false).unwrap().0;
     assert!(exact > prefix, "exact={exact} prefix={prefix}");
     assert!(prefix > substring, "prefix={prefix} substring={substring}");
 }
@@ -186,7 +208,7 @@ fn score_exact_gt_prefix_gt_substring() {
 #[test]
 fn score_case_insensitive() {
     let lower = score_name("abc", "ABC", false).unwrap().0;
-    let exact  = score_name("abc", "abc", false).unwrap().0;
+    let exact = score_name("abc", "abc", false).unwrap().0;
     assert_eq!(lower, exact);
 }
 
@@ -220,13 +242,19 @@ fn fold_text_lowercases_ascii() {
 
 fn build_test_index() -> EsIndex {
     let mut b = EsIndexBuilder::new();
-    let root   = b.add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0).unwrap();
-    let users  = b.add_record(2, root,  "Users",    flags::DIRECTORY, 1).unwrap();
-    let admin  = b.add_record(3, users, "admin",    flags::DIRECTORY, 2).unwrap();
-    let _docs  = b.add_record(4, admin, "Documents",flags::DIRECTORY, 3).unwrap();
-    let _notes = b.add_record(5, admin, "notes.txt",0, 4).unwrap();
-    let _code  = b.add_record(6, root,  "code",     flags::DIRECTORY, 1).unwrap();
-    let _rf    = b.add_record(7, root,  "readme.md",0, 2).unwrap();
+    let root = b
+        .add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0)
+        .unwrap();
+    let users = b.add_record(2, root, "Users", flags::DIRECTORY, 1).unwrap();
+    let admin = b
+        .add_record(3, users, "admin", flags::DIRECTORY, 2)
+        .unwrap();
+    let _docs = b
+        .add_record(4, admin, "Documents", flags::DIRECTORY, 3)
+        .unwrap();
+    let _notes = b.add_record(5, admin, "notes.txt", 0, 4).unwrap();
+    let _code = b.add_record(6, root, "code", flags::DIRECTORY, 1).unwrap();
+    let _rf = b.add_record(7, root, "readme.md", 0, 2).unwrap();
     b.finish().unwrap()
 }
 
@@ -241,7 +269,9 @@ fn search_exact_match_first() {
 #[test]
 fn search_returns_no_tombstones() {
     let mut b = EsIndexBuilder::new();
-    let root = b.add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0).unwrap();
+    let root = b
+        .add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0)
+        .unwrap();
     let file = b.add_record(2, root, "ghost.txt", 0, 1).unwrap();
     let mut idx = b.finish().unwrap();
     idx.delta.mark_deleted(file);
@@ -274,12 +304,17 @@ fn search_limit_zero_returns_empty() {
 #[test]
 fn search_directories_score_higher_than_files_on_same_name() {
     let mut b = EsIndexBuilder::new();
-    let root = b.add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0).unwrap();
+    let root = b
+        .add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0)
+        .unwrap();
     b.add_record(2, root, "src", flags::DIRECTORY, 0).unwrap();
     b.add_record(3, root, "src", 0, 0).unwrap();
     let idx = b.finish().unwrap();
     let results = idx.search("src", 10);
-    assert!(results[0].is_directory, "directory should rank above file with same name");
+    assert!(
+        results[0].is_directory,
+        "directory should rank above file with same name"
+    );
 }
 
 // ─── Enumerate ───────────────────────────────────────────────────────────────
@@ -299,8 +334,13 @@ fn enumerate_flat_lists_direct_children_only() {
 fn enumerate_recursive_finds_all_descendants() {
     let idx = build_test_index();
     let results = idx.enumerate(r"C:\", "", true, 100).unwrap();
-    assert_eq!(results.len(), 6, "expected 6 descendants, got {}: {:?}",
-        results.len(), results.iter().map(|r| &r.name).collect::<Vec<_>>());
+    assert_eq!(
+        results.len(),
+        6,
+        "expected 6 descendants, got {}: {:?}",
+        results.len(),
+        results.iter().map(|r| &r.name).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -328,9 +368,9 @@ fn enumerate_limit_zero_returns_empty() {
 #[test]
 fn enumerate_path_normalizes_trailing_slash() {
     let idx = build_test_index();
-    let with_slash    = idx.enumerate(r"C:\", "", false, 100).unwrap();
+    let with_slash = idx.enumerate(r"C:\", "", false, 100).unwrap();
     let without_slash = idx.enumerate("C:", "", false, 100).unwrap();
-    let names_with:    Vec<&str> = with_slash.iter().map(|r| r.name.as_str()).collect();
+    let names_with: Vec<&str> = with_slash.iter().map(|r| r.name.as_str()).collect();
     let names_without: Vec<&str> = without_slash.iter().map(|r| r.name.as_str()).collect();
     assert_eq!(names_with, names_without);
 }
@@ -346,20 +386,27 @@ fn delta_is_empty_on_new_index() {
 #[test]
 fn delta_mark_deleted_hides_from_search() {
     let mut b = EsIndexBuilder::new();
-    let root = b.add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0).unwrap();
-    let f    = b.add_record(2, root, "target.txt", 0, 1).unwrap();
+    let root = b
+        .add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0)
+        .unwrap();
+    let f = b.add_record(2, root, "target.txt", 0, 1).unwrap();
     let mut idx = b.finish().unwrap();
     assert!(!idx.search("target", 10).is_empty());
     idx.delta.mark_deleted(f);
-    assert!(idx.search("target", 10).is_empty(), "deleted record should be hidden");
+    assert!(
+        idx.search("target", 10).is_empty(),
+        "deleted record should be hidden"
+    );
 }
 
 #[test]
 fn delta_mark_deleted_does_not_affect_other_records() {
     let mut b = EsIndexBuilder::new();
-    let root = b.add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0).unwrap();
-    let f1   = b.add_record(2, root, "keep.txt", 0, 1).unwrap();
-    let _f2  = b.add_record(3, root, "delete.txt", 0, 1).unwrap();
+    let root = b
+        .add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0)
+        .unwrap();
+    let f1 = b.add_record(2, root, "keep.txt", 0, 1).unwrap();
+    let _f2 = b.add_record(3, root, "delete.txt", 0, 1).unwrap();
     let mut idx = b.finish().unwrap();
     idx.delta.mark_deleted(_f2);
     let results = idx.search("keep", 10);
@@ -373,16 +420,20 @@ fn delta_mark_deleted_does_not_affect_other_records() {
 #[test]
 fn path_from_idx_root_has_trailing_backslash() {
     let mut b = EsIndexBuilder::new();
-    let root = b.add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0).unwrap();
-    let idx  = b.finish().unwrap();
+    let root = b
+        .add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0)
+        .unwrap();
+    let idx = b.finish().unwrap();
     assert_eq!(idx.path_from_idx(root).unwrap(), r"C:\");
 }
 
 #[test]
 fn index_with_only_root_record() {
     let mut b = EsIndexBuilder::new();
-    let root = b.add_record(5, u32::MAX, "D:", flags::DIRECTORY, 0).unwrap();
-    let idx  = b.finish().unwrap();
+    let root = b
+        .add_record(5, u32::MAX, "D:", flags::DIRECTORY, 0)
+        .unwrap();
+    let idx = b.finish().unwrap();
     assert_eq!(idx.records_len(), 1);
     assert_eq!(idx.children(root).unwrap(), &[] as &[u32]);
 }
@@ -390,16 +441,19 @@ fn index_with_only_root_record() {
 #[test]
 fn name_retrieval_correctness() {
     let mut b = EsIndexBuilder::new();
-    let root = b.add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0).unwrap();
-    let f    = b.add_record(2, root, "hello world.txt", 0, 1).unwrap();
-    let idx  = b.finish().unwrap();
+    let root = b
+        .add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0)
+        .unwrap();
+    let f = b.add_record(2, root, "hello world.txt", 0, 1).unwrap();
+    let idx = b.finish().unwrap();
     assert_eq!(idx.name(f).unwrap(), "hello world.txt");
 }
 
 #[test]
 fn out_of_range_record_returns_error() {
     let mut b = EsIndexBuilder::new();
-    b.add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0).unwrap();
+    b.add_record(1, u32::MAX, "C:", flags::DIRECTORY, 0)
+        .unwrap();
     let idx = b.finish().unwrap();
     assert!(idx.record(999).is_err());
     assert!(idx.name(999).is_err());
@@ -419,9 +473,12 @@ fn search_results_sorted_by_score_descending() {
     let idx = build_test_index();
     let results = idx.search("a", 20);
     for pair in results.windows(2) {
-        assert!(pair[0].score >= pair[1].score,
+        assert!(
+            pair[0].score >= pair[1].score,
             "results not sorted: {} > {} violated",
-            pair[0].score, pair[1].score);
+            pair[0].score,
+            pair[1].score
+        );
     }
 }
 
@@ -455,7 +512,9 @@ use crate::usn::{EsUsnEvent, EsUsnEventKind};
 
 fn build_overlay_fixture() -> EsIndex {
     let mut b = EsIndexBuilder::new();
-    let root = b.add_record(5, u32::MAX, "C:", flags::DIRECTORY, 0).unwrap();
+    let root = b
+        .add_record(5, u32::MAX, "C:", flags::DIRECTORY, 0)
+        .unwrap();
     b.add_record(6, root, "Users", flags::DIRECTORY, 1).unwrap();
     b.finish().unwrap()
 }
@@ -517,7 +576,10 @@ fn delta_delete_hides_created_file() {
         name: None,
         flags: None,
     }]);
-    assert!(idx.search("gone.txt", 10).is_empty(), "deleted file must disappear");
+    assert!(
+        idx.search("gone.txt", 10).is_empty(),
+        "deleted file must disappear"
+    );
 }
 
 #[test]
@@ -562,7 +624,10 @@ fn delta_move_updates_child_path() {
             flags: Some(0),
         },
     ]);
-    assert_eq!(idx.search("leaf.txt", 10)[0].path, r"C:\Users\movedir\leaf.txt");
+    assert_eq!(
+        idx.search("leaf.txt", 10)[0].path,
+        r"C:\Users\movedir\leaf.txt"
+    );
 
     idx.apply_events(&[EsUsnEvent {
         kind: EsUsnEventKind::Move,
@@ -573,7 +638,10 @@ fn delta_move_updates_child_path() {
     }]);
     let results = idx.search("leaf.txt", 10);
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].path, r"C:\movedir\leaf.txt", "child path follows moved parent");
+    assert_eq!(
+        results[0].path, r"C:\movedir\leaf.txt",
+        "child path follows moved parent"
+    );
 }
 
 // ─── USN delta on BASE-snapshot records (O(1) overlay equivalence) ───────────
@@ -589,7 +657,9 @@ fn delta_move_updates_child_path() {
 /// A base snapshot with a real file record so we can delete/rename/move it.
 fn build_base_with_file() -> EsIndex {
     let mut b = EsIndexBuilder::new();
-    let root = b.add_record(5, u32::MAX, "C:", flags::DIRECTORY, 0).unwrap();
+    let root = b
+        .add_record(5, u32::MAX, "C:", flags::DIRECTORY, 0)
+        .unwrap();
     let users = b.add_record(6, root, "Users", flags::DIRECTORY, 1).unwrap();
     b.add_record(7, users, "base_file.txt", 0, 2).unwrap();
     b.finish().unwrap()
@@ -598,7 +668,11 @@ fn build_base_with_file() -> EsIndex {
 #[test]
 fn delta_delete_of_base_record_hides_it() {
     let mut idx = build_base_with_file();
-    assert_eq!(idx.search("base_file", 10).len(), 1, "precondition: base file searchable");
+    assert_eq!(
+        idx.search("base_file", 10).len(),
+        1,
+        "precondition: base file searchable"
+    );
     idx.apply_events(&[EsUsnEvent {
         kind: EsUsnEventKind::Delete,
         file_ref: 7,
@@ -615,7 +689,9 @@ fn delta_delete_of_base_record_hides_it() {
 #[test]
 fn delta_delete_of_base_record_leaves_siblings() {
     let mut b = EsIndexBuilder::new();
-    let root = b.add_record(5, u32::MAX, "C:", flags::DIRECTORY, 0).unwrap();
+    let root = b
+        .add_record(5, u32::MAX, "C:", flags::DIRECTORY, 0)
+        .unwrap();
     let users = b.add_record(6, root, "Users", flags::DIRECTORY, 1).unwrap();
     b.add_record(7, users, "gone.txt", 0, 2).unwrap();
     b.add_record(8, users, "stays.txt", 0, 2).unwrap();
@@ -627,7 +703,10 @@ fn delta_delete_of_base_record_leaves_siblings() {
         name: None,
         flags: None,
     }]);
-    assert!(idx.search("gone", 10).is_empty(), "deleted base record hidden");
+    assert!(
+        idx.search("gone", 10).is_empty(),
+        "deleted base record hidden"
+    );
     let kept = idx.search("stays", 10);
     assert_eq!(kept.len(), 1, "sibling base record unaffected");
     assert_eq!(kept[0].path, r"C:\Users\stays.txt");
@@ -655,9 +734,16 @@ fn delta_delete_then_recreate_same_record_number_is_visible() {
         name: Some("reborn.txt".to_owned()),
         flags: Some(0),
     }]);
-    assert!(idx.search("base_file", 10).is_empty(), "old name stays gone");
+    assert!(
+        idx.search("base_file", 10).is_empty(),
+        "old name stays gone"
+    );
     let results = idx.search("reborn.txt", 10);
-    assert_eq!(results.len(), 1, "recreated record-number must be visible again");
+    assert_eq!(
+        results.len(),
+        1,
+        "recreated record-number must be visible again"
+    );
     assert_eq!(results[0].path, r"C:\Users\reborn.txt");
 }
 
@@ -690,7 +776,10 @@ fn delta_move_of_base_record_updates_path() {
     }]);
     let results = idx.search("base_file", 10);
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].path, r"C:\base_file.txt", "moved base record reparented");
+    assert_eq!(
+        results[0].path, r"C:\base_file.txt",
+        "moved base record reparented"
+    );
 }
 
 #[test]

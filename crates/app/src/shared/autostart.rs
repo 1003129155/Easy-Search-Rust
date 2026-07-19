@@ -6,8 +6,8 @@
 
 #[cfg(windows)]
 use windows::Win32::System::Registry::{
-    HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ, RegCloseKey, RegDeleteValueW,
-    RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ, RegCloseKey, RegDeleteValueW, RegOpenKeyExW,
+    RegQueryValueExW, RegSetValueExW,
 };
 #[cfg(windows)]
 use windows::core::PCWSTR;
@@ -56,8 +56,7 @@ pub fn is_enabled() -> bool {
 /// Enable auto-start by writing the current exe path to the registry.
 #[cfg(windows)]
 pub fn enable() -> Result<(), String> {
-    let exe_path = std::env::current_exe()
-        .map_err(|e| format!("Failed to get exe path: {e}"))?;
+    let exe_path = std::env::current_exe().map_err(|e| format!("Failed to get exe path: {e}"))?;
     let exe_str = exe_path.to_string_lossy();
     // Wrap in quotes for paths with spaces
     let value = format!("\"{exe_str}\"");
@@ -78,10 +77,8 @@ pub fn enable() -> Result<(), String> {
 
         let name_wide = wide_null(VALUE_NAME);
         let value_wide = wide_null(&value);
-        let data_bytes = std::slice::from_raw_parts(
-            value_wide.as_ptr() as *const u8,
-            value_wide.len() * 2,
-        );
+        let data_bytes =
+            std::slice::from_raw_parts(value_wide.as_ptr() as *const u8, value_wide.len() * 2);
 
         let set_result = RegSetValueExW(
             hkey,

@@ -319,7 +319,11 @@ impl Renderer {
             // Calculate which items are visible based on selected_index
             let total_items = items.len();
             let max_visible = layout::MAX_VISIBLE_ITEMS;
-            let clamped_selected = if input_focused { 0 } else { selected_index.min(total_items.saturating_sub(1)) };
+            let clamped_selected = if input_focused {
+                0
+            } else {
+                selected_index.min(total_items.saturating_sub(1))
+            };
             let scroll_offset = if clamped_selected >= max_visible {
                 clamped_selected - max_visible + 1
             } else {

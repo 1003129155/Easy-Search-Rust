@@ -173,10 +173,13 @@ mod tests {
         };
         let error = MftError::from_join_error("read_all_index", &join_error);
 
-        assert!(matches!(error, MftError::Cancelled {
-            operation: "read_all_index",
-            ..
-        }));
+        assert!(matches!(
+            error,
+            MftError::Cancelled {
+                operation: "read_all_index",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -186,9 +189,12 @@ mod tests {
             reason: "task panicked".to_owned(),
         };
 
-        assert!(matches!(error, MftError::WaitFailed {
-            operation: "read_all_index",
-            ..
-        }));
+        assert!(matches!(
+            error,
+            MftError::WaitFailed {
+                operation: "read_all_index",
+                ..
+            }
+        ));
     }
 }

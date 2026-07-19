@@ -11,13 +11,13 @@ use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::System::Com::CoTaskMemFree;
 #[cfg(windows)]
 use windows::Win32::UI::Shell::{
-    CMINVOKECOMMANDINFO, CMF_EXPLORE, CMF_NORMAL, IContextMenu, IShellFolder, SHBindToParent,
+    CMF_EXPLORE, CMF_NORMAL, CMINVOKECOMMANDINFO, IContextMenu, IShellFolder, SHBindToParent,
     SHParseDisplayName,
 };
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreatePopupMenu, DestroyMenu, GetCursorPos, PostMessageW, SetForegroundWindow, TrackPopupMenu,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL,
+    CreatePopupMenu, DestroyMenu, GetCursorPos, PostMessageW, SetForegroundWindow, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TrackPopupMenu, WM_NULL,
 };
 #[cfg(windows)]
 use windows::core::{PCSTR, PCWSTR};
@@ -46,7 +46,8 @@ pub fn show_for_path(hwnd: HWND, path: &str, point: Option<POINT>) -> Result<(),
             .GetUIObjectOf(hwnd, &child_items, None)
             .map_err(|err| format!("GetUIObjectOf(IContextMenu) failed: {err}"))?;
 
-        let popup_menu = CreatePopupMenu().map_err(|err| format!("CreatePopupMenu failed: {err}"))?;
+        let popup_menu =
+            CreatePopupMenu().map_err(|err| format!("CreatePopupMenu failed: {err}"))?;
         let _menu_guard = MenuGuard(popup_menu);
 
         context_menu

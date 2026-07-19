@@ -5,8 +5,8 @@
 
 use alloc::sync::Arc;
 
-use tokio::task::JoinSet;
 use polars::prelude::{DataFrame, IntoLazy as _, col, lit};
+use tokio::task::JoinSet;
 
 use super::{DriveReadResult, MultiDriveMftReader, drive_reader_budget};
 use crate::error::{MftError, Result};

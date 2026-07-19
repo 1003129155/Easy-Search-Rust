@@ -116,14 +116,18 @@ pub(crate) async fn dispatch_command(command: Commands) -> Result<()> {
             parallel_parse,
             parse_workers,
         } => {
-            windows::cmd_benchmark_index_lean(drive, &mode, windows::BenchmarkIndexLeanOptions {
-                no_bitmap,
-                no_placeholders,
-                concurrency,
-                io_size_kb,
-                parallel_parse,
-                parse_workers,
-            })
+            windows::cmd_benchmark_index_lean(
+                drive,
+                &mode,
+                windows::BenchmarkIndexLeanOptions {
+                    no_bitmap,
+                    no_placeholders,
+                    concurrency,
+                    io_size_kb,
+                    parallel_parse,
+                    parse_workers,
+                },
+            )
             .await
         }
         Commands::BenchmarkTree {

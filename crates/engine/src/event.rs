@@ -12,9 +12,7 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
     /// A drive has started indexing.
-    DriveIndexing {
-        drive: char,
-    },
+    DriveIndexing { drive: char },
     /// A drive's index is ready.
     DriveReady {
         drive: char,
@@ -22,31 +20,19 @@ pub enum EngineEvent {
         elapsed: Duration,
     },
     /// A drive's index build failed.
-    DriveError {
-        drive: char,
-        error: String,
-    },
+    DriveError { drive: char, error: String },
     /// All configured drives have been indexed (or attempted).
     AllReady,
     /// USN journal events were applied to a drive.
-    UsnUpdate {
-        drive: char,
-        events_applied: usize,
-    },
+    UsnUpdate { drive: char, events_applied: usize },
     /// A drive was hot-added at runtime.
-    DriveAdded {
-        drive: char,
-    },
+    DriveAdded { drive: char },
     /// A drive was removed at runtime.
-    DriveRemoved {
-        drive: char,
-    },
+    DriveRemoved { drive: char },
     /// The engine is shutting down.
     Shutdown,
     /// A log message from the engine (for persistence by the consumer).
-    Log {
-        message: String,
-    },
+    Log { message: String },
 }
 
 /// Sender half for engine events.

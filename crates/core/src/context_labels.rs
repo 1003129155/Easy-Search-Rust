@@ -20,15 +20,8 @@ pub fn set_locale(locale: &str) {
 
 /// Get the current locale prefix (e.g. "zh", "ja", "en").
 fn locale_prefix() -> String {
-    let locale = CURRENT_LOCALE
-        .read()
-        .map(|s| s.clone())
-        .unwrap_or_default();
-    locale
-        .split('-')
-        .next()
-        .unwrap_or("en")
-        .to_string()
+    let locale = CURRENT_LOCALE.read().map(|s| s.clone()).unwrap_or_default();
+    locale.split('-').next().unwrap_or("en").to_string()
 }
 
 /// Get the current locale prefix (public version for use by plugins).
@@ -42,13 +35,25 @@ pub fn get_locale_prefix() -> String {
 pub fn open_item(is_directory: bool) -> String {
     match locale_prefix().as_str() {
         "zh" => {
-            if is_directory { "打开文件夹" } else { "打开文件" }
+            if is_directory {
+                "打开文件夹"
+            } else {
+                "打开文件"
+            }
         }
         "ja" => {
-            if is_directory { "フォルダーを開く" } else { "ファイルを開く" }
+            if is_directory {
+                "フォルダーを開く"
+            } else {
+                "ファイルを開く"
+            }
         }
         _ => {
-            if is_directory { "Open folder" } else { "Open file" }
+            if is_directory {
+                "Open folder"
+            } else {
+                "Open file"
+            }
         }
     }
     .to_string()
@@ -58,13 +63,25 @@ pub fn open_item(is_directory: bool) -> String {
 pub fn open_containing_folder(is_directory: bool) -> String {
     match locale_prefix().as_str() {
         "zh" => {
-            if is_directory { "打开上级文件夹" } else { "打开所在文件夹" }
+            if is_directory {
+                "打开上级文件夹"
+            } else {
+                "打开所在文件夹"
+            }
         }
         "ja" => {
-            if is_directory { "親フォルダーを開く" } else { "格納フォルダーを開く" }
+            if is_directory {
+                "親フォルダーを開く"
+            } else {
+                "格納フォルダーを開く"
+            }
         }
         _ => {
-            if is_directory { "Open parent folder" } else { "Open containing folder" }
+            if is_directory {
+                "Open parent folder"
+            } else {
+                "Open containing folder"
+            }
         }
     }
     .to_string()
@@ -104,13 +121,25 @@ pub fn copy_name() -> String {
 pub fn toggle_quick_launch(is_saved: bool) -> String {
     match locale_prefix().as_str() {
         "zh" => {
-            if is_saved { "从快速启动移除" } else { "添加到快速启动" }
+            if is_saved {
+                "从快速启动移除"
+            } else {
+                "添加到快速启动"
+            }
         }
         "ja" => {
-            if is_saved { "クイック起動から削除" } else { "クイック起動に追加" }
+            if is_saved {
+                "クイック起動から削除"
+            } else {
+                "クイック起動に追加"
+            }
         }
         _ => {
-            if is_saved { "Remove from Quick Launch" } else { "Add to Quick Launch" }
+            if is_saved {
+                "Remove from Quick Launch"
+            } else {
+                "Add to Quick Launch"
+            }
         }
     }
     .to_string()

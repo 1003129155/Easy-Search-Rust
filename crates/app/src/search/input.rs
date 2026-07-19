@@ -86,7 +86,11 @@ impl InputState {
         if self.cursor >= self.text.len() {
             return;
         }
-        let next = self.cursor + self.text[self.cursor..].chars().next().map_or(0, |c| c.len_utf8());
+        let next = self.cursor
+            + self.text[self.cursor..]
+                .chars()
+                .next()
+                .map_or(0, |c| c.len_utf8());
         self.text.drain(self.cursor..next);
     }
 

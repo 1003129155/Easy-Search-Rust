@@ -143,10 +143,7 @@ mod tests {
             humanize_package_name("Microsoft.WindowsCalculator"),
             "Windows Calculator"
         );
-        assert_eq!(
-            humanize_package_name("Microsoft.ZuneMusic"),
-            "Zune Music"
-        );
+        assert_eq!(humanize_package_name("Microsoft.ZuneMusic"), "Zune Music");
         assert_eq!(humanize_package_name("Simple"), "Simple");
     }
 

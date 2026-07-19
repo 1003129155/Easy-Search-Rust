@@ -242,18 +242,21 @@ mod tests {
                 lcn: Lcn::new(9_000),
             },
         ];
-        assert_eq!(data_runs_to_extents(&runs), vec![
-            MftExtent {
-                vcn: 0,
-                cluster_count: 100,
-                lcn: Lcn::new(5_000),
-            },
-            MftExtent {
-                vcn: 150,
-                cluster_count: 200,
-                lcn: Lcn::new(9_000),
-            },
-        ],);
+        assert_eq!(
+            data_runs_to_extents(&runs),
+            vec![
+                MftExtent {
+                    vcn: 0,
+                    cluster_count: 100,
+                    lcn: Lcn::new(5_000),
+                },
+                MftExtent {
+                    vcn: 150,
+                    cluster_count: 200,
+                    lcn: Lcn::new(9_000),
+                },
+            ],
+        );
     }
 
     #[test]
@@ -266,11 +269,14 @@ mod tests {
             cluster_count: 98_752,
             lcn: Lcn::new(786_432),
         }];
-        assert_eq!(data_runs_to_extents(&runs), vec![MftExtent {
-            vcn: 0,
-            cluster_count: 98_752,
-            lcn: Lcn::new(786_432),
-        }],);
+        assert_eq!(
+            data_runs_to_extents(&runs),
+            vec![MftExtent {
+                vcn: 0,
+                cluster_count: 98_752,
+                lcn: Lcn::new(786_432),
+            }],
+        );
     }
 
     #[test]

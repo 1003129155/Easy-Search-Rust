@@ -48,10 +48,9 @@ impl EsIndexBuilder {
             })?;
         let name_len =
             u16::try_from(name.len()).map_err(|_| EsError::NameTooLong { len: name.len() })?;
-        let idx =
-            u32::try_from(self.records.len()).map_err(|_| EsError::RecordCountTooLarge {
-                len: self.records.len(),
-            })?;
+        let idx = u32::try_from(self.records.len()).map_err(|_| EsError::RecordCountTooLarge {
+            len: self.records.len(),
+        })?;
 
         self.names.extend_from_slice(name.as_bytes());
         self.records.push(EsRecord {
@@ -79,12 +78,11 @@ impl EsIndexBuilder {
             if record.parent_idx == u32::MAX {
                 continue;
             }
-            let parent_idx = usize::try_from(record.parent_idx).map_err(|_| {
-                EsError::RecordIndexOutOfRange {
+            let parent_idx =
+                usize::try_from(record.parent_idx).map_err(|_| EsError::RecordIndexOutOfRange {
                     index: record.parent_idx,
                     len: self.records.len(),
-                }
-            })?;
+                })?;
             let Some(bucket) = children.get_mut(parent_idx) else {
                 return Err(EsError::RecordIndexOutOfRange {
                     index: record.parent_idx,

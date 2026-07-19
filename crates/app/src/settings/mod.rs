@@ -24,9 +24,9 @@ pub fn open_settings_file(_settings: Arc<RwLock<Settings>>) {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
-        use windows::core::PCWSTR;
         use windows::Win32::UI::Shell::ShellExecuteW;
         use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        use windows::core::PCWSTR;
 
         let path_wide: Vec<u16> = settings_path
             .as_os_str()

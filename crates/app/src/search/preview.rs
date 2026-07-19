@@ -55,11 +55,7 @@ impl PreviewInfo {
             format_size(metadata.len())
         };
 
-        let created_at = metadata
-            .created()
-            .ok()
-            .map(format_time)
-            .unwrap_or_default();
+        let created_at = metadata.created().ok().map(format_time).unwrap_or_default();
 
         let modified_at = metadata
             .modified()

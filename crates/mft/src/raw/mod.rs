@@ -572,11 +572,14 @@ fn load_iocp_as_raw_mft<P: AsRef<Path>>(path: P, options: &LoadRawOptions) -> Re
 ///
 /// Returns an error if reading fails or file format is invalid.
 pub fn load_raw_mft_header<P: AsRef<Path>>(path: P) -> Result<RawMftHeader> {
-    let result = load_raw_mft(path, &LoadRawOptions {
-        header_only: true,
-        volume_letter: None,
-        forensic: false,
-    })?;
+    let result = load_raw_mft(
+        path,
+        &LoadRawOptions {
+            header_only: true,
+            volume_letter: None,
+            forensic: false,
+        },
+    )?;
     Ok(result.header)
 }
 

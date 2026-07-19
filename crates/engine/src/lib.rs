@@ -718,16 +718,13 @@ fn schedule_compact(
             rebuilt.status.last_usn = candidate.last_usn;
 
             let rebuilt_records = rebuilt.records_len();
-            let committed = manager
-                .write()
-                .ok()
-                .and_then(|mut manager| {
-                    if !manager.compact_revision_matches(candidate.drive, candidate.revision) {
-                        return None;
-                    }
-                    let ok = manager.commit_compact(candidate.drive, candidate.revision, rebuilt);
-                    ok.then_some(())
-                });
+            let committed = manager.write().ok().and_then(|mut manager| {
+                if !manager.compact_revision_matches(candidate.drive, candidate.revision) {
+                    return None;
+                }
+                let ok = manager.commit_compact(candidate.drive, candidate.revision, rebuilt);
+                ok.then_some(())
+            });
             if committed.is_none() {
                 easysearch_core::log_debug!(
                     "{}: compact discarded because the index changed during rebuild",

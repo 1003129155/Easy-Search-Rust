@@ -688,8 +688,17 @@ fn hash_icon_pixels(width: u32, height: u32, pixels: &[u8]) -> u64 {
 fn is_unique_icon_ext(ext: &str) -> bool {
     matches!(
         ext.to_ascii_lowercase().as_str(),
-        ".exe" | ".lnk" | ".ico" | ".url" | ".png" | ".jpg" | ".jpeg" | ".webp" | ".bmp"
-            | ".gif" | ".svg"
+        ".exe"
+            | ".lnk"
+            | ".ico"
+            | ".url"
+            | ".png"
+            | ".jpg"
+            | ".jpeg"
+            | ".webp"
+            | ".bmp"
+            | ".gif"
+            | ".svg"
     )
 }
 

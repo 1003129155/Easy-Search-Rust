@@ -193,7 +193,13 @@ const COMMANDS: &[CmdEntry] = &[
         needs_confirm: false,
     },
     CmdEntry {
-        keywords: &["userdata", "user data", "data folder", "数据目录", "用户数据"],
+        keywords: &[
+            "userdata",
+            "user data",
+            "data folder",
+            "数据目录",
+            "用户数据",
+        ],
         title: "打开数据目录",
         subtitle: "在资源管理器中打开用户数据文件夹",
         icon: "app",
@@ -344,7 +350,8 @@ impl Plugin for SysCmdPlugin {
     fn description_for_locale(&self, locale: &str) -> String {
         match locale.split('-').next().unwrap_or(locale) {
             "zh" => "执行关机、重启、锁定以及 EasySearch 应用命令".to_string(),
-            "ja" => "シャットダウン、再起動、ロック、EasySearch のアプリ内コマンドを実行します".to_string(),
+            "ja" => "シャットダウン、再起動、ロック、EasySearch のアプリ内コマンドを実行します"
+                .to_string(),
             _ => "Run power, session, and EasySearch system commands".to_string(),
         }
     }

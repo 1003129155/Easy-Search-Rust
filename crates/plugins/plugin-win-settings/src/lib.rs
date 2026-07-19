@@ -176,11 +176,7 @@ impl Plugin for WinSettingsPlugin {
                     }
                 }
 
-                if score > 0 {
-                    Some((e, score))
-                } else {
-                    None
-                }
+                if score > 0 { Some((e, score)) } else { None }
             })
             .collect();
 
@@ -230,7 +226,10 @@ impl Plugin for WinSettingsPlugin {
         let (label, description) = match locale_prefix(locale) {
             "zh" => ("最大显示数量", "搜索结果最多显示多少条"),
             "ja" => ("最大表示件数", "検索結果に表示する件数の上限です"),
-            _ => ("Maximum results", "How many Windows settings items to show at most"),
+            _ => (
+                "Maximum results",
+                "How many Windows settings items to show at most",
+            ),
         };
 
         Some(vec![SettingItem {

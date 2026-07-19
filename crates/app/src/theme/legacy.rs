@@ -105,12 +105,11 @@ fn is_dark_mode() -> bool {
         use std::os::windows::ffi::OsStrExt;
 
         // Read HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\AppsUseLightTheme
-        let subkey: Vec<u16> = OsStr::new(
-            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-        )
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
+        let subkey: Vec<u16> =
+            OsStr::new(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
 
         let value_name: Vec<u16> = OsStr::new("AppsUseLightTheme")
             .encode_wide()
@@ -119,8 +118,8 @@ fn is_dark_mode() -> bool {
 
         unsafe {
             use windows::Win32::System::Registry::{
-                HKEY_CURRENT_USER, KEY_READ, REG_DWORD, RegOpenKeyExW, RegQueryValueExW,
-                RegCloseKey,
+                HKEY_CURRENT_USER, KEY_READ, REG_DWORD, RegCloseKey, RegOpenKeyExW,
+                RegQueryValueExW,
             };
 
             let mut hkey = Default::default();

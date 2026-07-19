@@ -205,9 +205,12 @@ fn non_resident_attribute_helpers_decode_mapping_pairs() {
         nr_offset + size_of::<NonResidentAttributeData>()
     );
 
-    assert_eq!(attribute.data_runs(), vec![DataRun {
-        vcn: 7,
-        cluster_count: 5,
-        lcn: crate::platform::Lcn::new(10),
-    }]);
+    assert_eq!(
+        attribute.data_runs(),
+        vec![DataRun {
+            vcn: 7,
+            cluster_count: 5,
+            lcn: crate::platform::Lcn::new(10),
+        }]
+    );
 }

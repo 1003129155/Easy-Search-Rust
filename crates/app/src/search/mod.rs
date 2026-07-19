@@ -22,14 +22,14 @@ mod messages;
 #[allow(dead_code)]
 pub mod pinyin;
 mod plugin_bridge;
-mod render_bridge;
-mod search_flow;
-mod settings_sync;
-mod visibility;
 #[allow(dead_code)]
 pub mod preview;
+mod render_bridge;
 pub mod renderer;
+mod search_flow;
+mod settings_sync;
 pub mod shell_context_menu;
+mod visibility;
 pub mod window;
 
 // Re-export the main entry point so callers can use `search::run()`.

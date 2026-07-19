@@ -323,10 +323,13 @@ fn parse_record_forensic_reads_unaligned_extension_record_slice() {
         AttributeType::FileName,
         &create_file_name_value(42, "ext-name.txt", 1),
     );
-    let record =
-        create_test_record_with_attributes(extension_frs, true, false, base_file_reference, &[
-            file_name_attr,
-        ]);
+    let record = create_test_record_with_attributes(
+        extension_frs,
+        true,
+        false,
+        base_file_reference,
+        &[file_name_attr],
+    );
     let mut storage = vec![0_u8; record.len() + 1];
     storage[1..].copy_from_slice(&record);
 

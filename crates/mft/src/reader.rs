@@ -577,11 +577,10 @@ mod tests {
         // returns the same letters in order.
         use crate::platform::DriveLetter;
         let reader = MultiDriveMftReader::new(vec![DriveLetter::C, DriveLetter::D, DriveLetter::E]);
-        assert_eq!(reader.drives(), &[
-            DriveLetter::C,
-            DriveLetter::D,
-            DriveLetter::E
-        ]);
+        assert_eq!(
+            reader.drives(),
+            &[DriveLetter::C, DriveLetter::D, DriveLetter::E]
+        );
     }
 
     #[test]

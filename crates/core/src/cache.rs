@@ -97,10 +97,7 @@ pub fn write_flow_cache(
 
 fn tmp_path(final_path: &Path) -> PathBuf {
     let mut p = final_path.to_owned();
-    let mut name = p
-        .file_name()
-        .unwrap_or_default()
-        .to_os_string();
+    let mut name = p.file_name().unwrap_or_default().to_os_string();
     name.push(".tmp");
     p.set_file_name(name);
     p
@@ -131,8 +128,8 @@ fn write_to(
     let file_ref_map_offset = children_indices_offset + children_indices_bytes;
 
     let fref_bytes = encode_file_ref_map(&index.file_ref_map);
-    let search_index_offset = file_ref_map_offset
-        + u64::try_from(fref_bytes.len()).unwrap_or(u64::MAX);
+    let search_index_offset =
+        file_ref_map_offset + u64::try_from(fref_bytes.len()).unwrap_or(u64::MAX);
 
     // ── Header ───────────────────────────────────────────────────────────────
     let mut header = EsCacheHeader::new(volume_serial, usn_journal_id, index.status.last_usn);
@@ -170,10 +167,7 @@ fn write_all(out: &mut impl Write, data: &[u8]) -> Result<()> {
 /// # Errors
 ///
 /// Returns [`EsError`] on I/O or validation failure.
-pub fn read_flow_cache(
-    cache_dir: &Path,
-    volume_serial: u64,
-) -> Result<Option<EsIndex>> {
+pub fn read_flow_cache(cache_dir: &Path, volume_serial: u64) -> Result<Option<EsIndex>> {
     let path = cache_dir.join(cache_file_name(volume_serial));
     if !path.exists() {
         return Ok(None);
@@ -341,7 +335,9 @@ mod tests {
 
     fn build_small_index() -> EsIndex {
         let mut b = EsIndexBuilder::new();
-        let root = b.add_record(5, u32::MAX, "C:", flags::DIRECTORY, 0).unwrap();
+        let root = b
+            .add_record(5, u32::MAX, "C:", flags::DIRECTORY, 0)
+            .unwrap();
         let users = b.add_record(6, root, "Users", flags::DIRECTORY, 1).unwrap();
         b.add_record(7, users, "readme.txt", 0, 2).unwrap();
         b.finish().unwrap()

@@ -56,15 +56,24 @@ fn load_strings(lang: Language) -> HashMap<&'static str, &'static str> {
             m.insert("tray_exit", "Exit");
         }
         Language::ChineseSimplified => {
-            m.insert("placeholder_ready", "\u{8F93}\u{5165}\u{4EE5}\u{641C}\u{7D22}...");
-            m.insert("placeholder_indexing", "\u{6B63}\u{5728}\u{6784}\u{5EFA}\u{7D22}\u{5F15}...");
+            m.insert(
+                "placeholder_ready",
+                "\u{8F93}\u{5165}\u{4EE5}\u{641C}\u{7D22}...",
+            );
+            m.insert(
+                "placeholder_indexing",
+                "\u{6B63}\u{5728}\u{6784}\u{5EFA}\u{7D22}\u{5F15}...",
+            );
             m.insert("tray_show", "\u{663E}\u{793A}");
             m.insert("tray_settings", "\u{8BBE}\u{7F6E}");
             m.insert("tray_exit", "\u{9000}\u{51FA}");
         }
         Language::Japanese => {
             m.insert("placeholder_ready", "\u{691C}\u{7D22}...");
-            m.insert("placeholder_indexing", "\u{30A4}\u{30F3}\u{30C7}\u{30C3}\u{30AF}\u{30B9}\u{69CB}\u{7BC9}\u{4E2D}...");
+            m.insert(
+                "placeholder_indexing",
+                "\u{30A4}\u{30F3}\u{30C7}\u{30C3}\u{30AF}\u{30B9}\u{69CB}\u{7BC9}\u{4E2D}...",
+            );
             m.insert("tray_show", "\u{8868}\u{793A}");
             m.insert("tray_settings", "\u{8A2D}\u{5B9A}");
             m.insert("tray_exit", "\u{7D42}\u{4E86}");
@@ -93,8 +102,7 @@ fn detect_system_language() -> Language {
 
         unsafe {
             use windows::Win32::System::Registry::{
-                HKEY_CURRENT_USER, KEY_READ, REG_SZ, RegCloseKey, RegOpenKeyExW,
-                RegQueryValueExW,
+                HKEY_CURRENT_USER, KEY_READ, REG_SZ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
             };
 
             let mut hkey = Default::default();

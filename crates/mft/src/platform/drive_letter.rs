@@ -360,9 +360,10 @@ mod tests {
 
     #[test]
     fn parse_rejects_digits() {
-        assert_eq!(DriveLetter::parse('1').unwrap_err(), DriveLetterError {
-            raw: '1'
-        });
+        assert_eq!(
+            DriveLetter::parse('1').unwrap_err(),
+            DriveLetterError { raw: '1' }
+        );
         DriveLetter::parse('0').unwrap_err();
         DriveLetter::parse('9').unwrap_err();
     }

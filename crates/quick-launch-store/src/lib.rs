@@ -43,19 +43,23 @@ impl QuickLaunchStore {
 
     #[must_use]
     pub fn contains(&self, path: &str) -> bool {
-        self.items.iter().any(|item| item.path.eq_ignore_ascii_case(path))
+        self.items
+            .iter()
+            .any(|item| item.path.eq_ignore_ascii_case(path))
     }
 
     pub fn add(&mut self, item: QuickLaunchItem) {
         if self.contains(&item.path) {
-            self.items.retain(|existing| !existing.path.eq_ignore_ascii_case(&item.path));
+            self.items
+                .retain(|existing| !existing.path.eq_ignore_ascii_case(&item.path));
         }
         self.items.push(item);
     }
 
     pub fn remove(&mut self, path: &str) -> bool {
         let before = self.items.len();
-        self.items.retain(|item| !item.path.eq_ignore_ascii_case(path));
+        self.items
+            .retain(|item| !item.path.eq_ignore_ascii_case(path));
         self.items.len() != before
     }
 

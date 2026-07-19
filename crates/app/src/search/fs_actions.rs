@@ -23,7 +23,9 @@ pub fn open_parent_folder(path: &str) {
             .unwrap_or_else(|| PathBuf::from(path))
     };
 
-    let _ = std::process::Command::new("explorer.exe").arg(target).spawn();
+    let _ = std::process::Command::new("explorer.exe")
+        .arg(target)
+        .spawn();
 }
 
 #[cfg(windows)]

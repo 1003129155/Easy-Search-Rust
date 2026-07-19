@@ -3,11 +3,11 @@
 //! Global hotkey registration (Alt+Space).
 
 #[cfg(windows)]
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT,
-};
-#[cfg(windows)]
 use windows::Win32::Foundation::HWND;
+#[cfg(windows)]
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    HOT_KEY_MODIFIERS, MOD_ALT, RegisterHotKey, UnregisterHotKey,
+};
 
 /// Hotkey ID used in WM_HOTKEY messages.
 pub const HOTKEY_ID: i32 = 1;

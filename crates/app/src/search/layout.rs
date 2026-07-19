@@ -12,11 +12,7 @@ use windows::Win32::Foundation::HWND;
 pub fn dpi_scale(hwnd: HWND) -> f32 {
     use windows::Win32::UI::HiDpi::GetDpiForWindow;
     let dpi = unsafe { GetDpiForWindow(hwnd) };
-    if dpi == 0 {
-        1.0
-    } else {
-        dpi as f32 / 96.0
-    }
+    if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 }
 }
 
 /// Scale a logical pixel value to physical pixels for the given window's DPI.
@@ -127,7 +123,11 @@ pub fn window_height(result_count: usize) -> f32 {
     if result_count == 0 {
         SEARCH_BAR_HEIGHT
     } else {
-        SEARCH_BAR_HEIGHT + SEPARATOR_HEIGHT + RESULT_MARGIN_V + items * ITEM_HEIGHT + RESULT_MARGIN_V
+        SEARCH_BAR_HEIGHT
+            + SEPARATOR_HEIGHT
+            + RESULT_MARGIN_V
+            + items * ITEM_HEIGHT
+            + RESULT_MARGIN_V
     }
 }
 
@@ -149,7 +149,11 @@ pub fn window_height_scaled(result_count: usize, hwnd: HWND) -> i32 {
 
 /// Calculate total window height with preview (physical pixels) scaled for DPI.
 #[cfg(windows)]
-pub fn window_height_with_preview_scaled(result_count: usize, has_preview: bool, hwnd: HWND) -> i32 {
+pub fn window_height_with_preview_scaled(
+    result_count: usize,
+    has_preview: bool,
+    hwnd: HWND,
+) -> i32 {
     scale(window_height_with_preview(result_count, has_preview), hwnd)
 }
 

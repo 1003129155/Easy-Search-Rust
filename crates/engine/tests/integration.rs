@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 
 use easysearch_core::{
     EsIndexBuilder,
-    usn::{EsUsnEvent, EsUsnEventKind},
     record::flags,
+    usn::{EsUsnEvent, EsUsnEventKind},
 };
 use easysearch_engine::{DriveManager, EngineConfig, EngineEvent, SearchEngine};
 
@@ -42,13 +42,20 @@ use easysearch_engine::{DriveManager, EngineConfig, EngineEvent, SearchEngine};
 /// ```
 fn build_test_index(drive: char) -> easysearch_core::EsIndex {
     let mut b = EsIndexBuilder::new();
-    let root = b.add_record(5, u32::MAX, &format!("{drive}:"), flags::DIRECTORY, 0).unwrap();
-    let src  = b.add_record(6, root,  "src",       flags::DIRECTORY, 0).unwrap();
-    /*main */  b.add_record(7, src,   "main.rs",   0,                1).unwrap();
-    /*lib  */  b.add_record(8, src,   "lib.rs",    0,                1).unwrap();
-    /*cargo*/  b.add_record(9, root,  "Cargo.toml",0,                1).unwrap();
-    /*readme*/ b.add_record(10, root, "README.md", 0,                1).unwrap();
-    /*build */ b.add_record(11, root, "build.ps1", 0,                1).unwrap();
+    let root = b
+        .add_record(5, u32::MAX, &format!("{drive}:"), flags::DIRECTORY, 0)
+        .unwrap();
+    let src = b.add_record(6, root, "src", flags::DIRECTORY, 0).unwrap();
+    /*main */
+    b.add_record(7, src, "main.rs", 0, 1).unwrap();
+    /*lib  */
+    b.add_record(8, src, "lib.rs", 0, 1).unwrap();
+    /*cargo*/
+    b.add_record(9, root, "Cargo.toml", 0, 1).unwrap();
+    /*readme*/
+    b.add_record(10, root, "README.md", 0, 1).unwrap();
+    /*build */
+    b.add_record(11, root, "build.ps1", 0, 1).unwrap();
     b.finish().unwrap()
 }
 
@@ -77,7 +84,10 @@ fn search_finds_partial_match_and_ranks_by_score() {
     let results = mgr.search("lib", 10);
     assert!(results.iter().any(|r| r.name == "lib.rs"), "应匹配 lib.rs");
     // main.rs 不含 "lib"
-    assert!(!results.iter().any(|r| r.name == "main.rs"), "main.rs 不应出现");
+    assert!(
+        !results.iter().any(|r| r.name == "main.rs"),
+        "main.rs 不应出现"
+    );
 }
 
 #[test]
@@ -91,8 +101,11 @@ fn search_extension_glob_matches_all_rs_files() {
 
     let results = mgr.search(&normalized, 10);
     let names: Vec<&str> = results.iter().map(|r| r.name.as_str()).collect();
-    assert!(names.contains(&"main.rs"), "应包含 main.rs，实际 = {names:?}");
-    assert!(names.contains(&"lib.rs"),  "应包含 lib.rs，实际 = {names:?}");
+    assert!(
+        names.contains(&"main.rs"),
+        "应包含 main.rs，实际 = {names:?}"
+    );
+    assert!(names.contains(&"lib.rs"), "应包含 lib.rs，实际 = {names:?}");
     // Cargo.toml 不含 ".rs"
     assert!(!names.contains(&"Cargo.toml"), "Cargo.toml 不应出现");
 }
@@ -164,8 +177,14 @@ fn enumerate_lists_directory_children() {
 
     let children = mgr.enumerate(r"C:\src", "", false, 20).unwrap();
     let names: Vec<&str> = children.iter().map(|r| r.name.as_str()).collect();
-    assert!(names.contains(&"main.rs"), "src/ 应含 main.rs，实际 = {names:?}");
-    assert!(names.contains(&"lib.rs"),  "src/ 应含 lib.rs，实际 = {names:?}");
+    assert!(
+        names.contains(&"main.rs"),
+        "src/ 应含 main.rs，实际 = {names:?}"
+    );
+    assert!(
+        names.contains(&"lib.rs"),
+        "src/ 应含 lib.rs，实际 = {names:?}"
+    );
     // 不应含 root 下的文件
     assert!(!names.contains(&"Cargo.toml"), "Cargo.toml 是 root 的子项");
 }
@@ -177,8 +196,8 @@ fn enumerate_root_lists_top_level_entries() {
 
     let entries = mgr.enumerate("C:", "", false, 20).unwrap();
     let names: Vec<&str> = entries.iter().map(|r| r.name.as_str()).collect();
-    assert!(names.contains(&"src"),       "root 应含 src/");
-    assert!(names.contains(&"Cargo.toml"),"root 应含 Cargo.toml");
+    assert!(names.contains(&"src"), "root 应含 src/");
+    assert!(names.contains(&"Cargo.toml"), "root 应含 Cargo.toml");
     assert!(names.contains(&"README.md"), "root 应含 README.md");
 }
 
@@ -197,10 +216,7 @@ fn search_filter_files_only_excludes_directories() {
     assert!(all.iter().any(|r| r.is_directory), "未过滤时应包含目录");
 
     // SearchFilter::files_only 的逻辑等价于 exclude_flags = DIRECTORY
-    let filtered: Vec<_> = all
-        .into_iter()
-        .filter(|r| !r.is_directory)
-        .collect();
+    let filtered: Vec<_> = all.into_iter().filter(|r| !r.is_directory).collect();
     assert!(
         filtered.iter().all(|r| !r.is_directory),
         "files_only 过滤后不应含目录"
@@ -243,11 +259,11 @@ fn usn_create_event_makes_file_searchable() {
 
     // root 目录的 file_ref 是 5（见 build_test_index）
     let events = vec![EsUsnEvent {
-        kind:       EsUsnEventKind::Create,
-        file_ref:   999,
+        kind: EsUsnEventKind::Create,
+        file_ref: 999,
         parent_ref: Some(5), // C: 根目录
-        name:       Some("hello_world.rs".to_string()),
-        flags:      Some(0), // 普通文件
+        name: Some("hello_world.rs".to_string()),
+        flags: Some(0), // 普通文件
     }];
     mgr.apply('C', &events, 100, 1);
 
@@ -268,30 +284,44 @@ fn usn_create_then_delete_overlay_record_disappears() {
 
     // 用一个不在 base 索引里的 file_ref（999）模拟真实盘上新分配的 MFT 记录。
     let file_ref = 999u64;
-    mgr.apply('C', &[EsUsnEvent {
-        kind:       EsUsnEventKind::Create,
-        file_ref,
-        parent_ref: Some(5), // C: 根目录
-        name:       Some("ephemeral_temp.tmp".to_string()),
-        flags:      Some(0),
-    }], 600, 1);
+    mgr.apply(
+        'C',
+        &[EsUsnEvent {
+            kind: EsUsnEventKind::Create,
+            file_ref,
+            parent_ref: Some(5), // C: 根目录
+            name: Some("ephemeral_temp.tmp".to_string()),
+            flags: Some(0),
+        }],
+        600,
+        1,
+    );
 
     assert!(
-        mgr.search("ephemeral_temp", 10).iter().any(|r| r.name == "ephemeral_temp.tmp"),
+        mgr.search("ephemeral_temp", 10)
+            .iter()
+            .any(|r| r.name == "ephemeral_temp.tmp"),
         "Create 后应能搜到临时文件"
     );
 
     // 删除同一个 file_ref。
-    mgr.apply('C', &[EsUsnEvent {
-        kind:       EsUsnEventKind::Delete,
-        file_ref,
-        parent_ref: None,
-        name:       None,
-        flags:      None,
-    }], 700, 1);
+    mgr.apply(
+        'C',
+        &[EsUsnEvent {
+            kind: EsUsnEventKind::Delete,
+            file_ref,
+            parent_ref: None,
+            name: None,
+            flags: None,
+        }],
+        700,
+        1,
+    );
 
     assert!(
-        !mgr.search("ephemeral_temp", 10).iter().any(|r| r.name == "ephemeral_temp.tmp"),
+        !mgr.search("ephemeral_temp", 10)
+            .iter()
+            .any(|r| r.name == "ephemeral_temp.tmp"),
         "Delete 后临时文件应从搜索结果中消失，实际 = {:?}",
         mgr.search("ephemeral_temp", 10)
     );
@@ -308,35 +338,51 @@ fn usn_rename_overlay_inserted_record_updates_name() {
 
     // 用一个不在 base 索引里的 file_ref（999）模拟新建文件。
     let file_ref = 999u64;
-    mgr.apply('C', &[EsUsnEvent {
-        kind:       EsUsnEventKind::Create,
-        file_ref,
-        parent_ref: Some(5), // C: 根目录
-        name:       Some("draft.txt".to_string()),
-        flags:      Some(0),
-    }], 600, 1);
+    mgr.apply(
+        'C',
+        &[EsUsnEvent {
+            kind: EsUsnEventKind::Create,
+            file_ref,
+            parent_ref: Some(5), // C: 根目录
+            name: Some("draft.txt".to_string()),
+            flags: Some(0),
+        }],
+        600,
+        1,
+    );
 
     assert!(
-        mgr.search("draft", 10).iter().any(|r| r.name == "draft.txt"),
+        mgr.search("draft", 10)
+            .iter()
+            .any(|r| r.name == "draft.txt"),
         "创建后应能搜到 draft.txt"
     );
 
     // 重命名同一个 overlay 记录 draft.txt -> final.txt。
-    mgr.apply('C', &[EsUsnEvent {
-        kind:       EsUsnEventKind::Rename,
-        file_ref,
-        parent_ref: Some(5),
-        name:       Some("final.txt".to_string()),
-        flags:      Some(0),
-    }], 700, 1);
+    mgr.apply(
+        'C',
+        &[EsUsnEvent {
+            kind: EsUsnEventKind::Rename,
+            file_ref,
+            parent_ref: Some(5),
+            name: Some("final.txt".to_string()),
+            flags: Some(0),
+        }],
+        700,
+        1,
+    );
 
     assert!(
-        !mgr.search("draft", 10).iter().any(|r| r.name == "draft.txt"),
+        !mgr.search("draft", 10)
+            .iter()
+            .any(|r| r.name == "draft.txt"),
         "重命名后 draft.txt 不应出现，实际 = {:?}",
         mgr.search("draft", 10)
     );
     assert!(
-        mgr.search("final", 10).iter().any(|r| r.name == "final.txt"),
+        mgr.search("final", 10)
+            .iter()
+            .any(|r| r.name == "final.txt"),
         "重命名后应能搜到 final.txt，实际 = {:?}",
         mgr.search("final", 10)
     );
@@ -357,11 +403,11 @@ fn usn_delete_event_removes_file_from_search() {
 
     // main.rs 的 file_ref 是 7（见 build_test_index）
     let events = vec![EsUsnEvent {
-        kind:       EsUsnEventKind::Delete,
-        file_ref:   7,
+        kind: EsUsnEventKind::Delete,
+        file_ref: 7,
         parent_ref: None,
-        name:       None,
-        flags:      None,
+        name: None,
+        flags: None,
     }];
     mgr.apply('C', &events, 200, 1);
 
@@ -380,11 +426,11 @@ fn usn_rename_event_updates_filename() {
 
     // lib.rs (file_ref=8) 重命名为 library.rs
     let events = vec![EsUsnEvent {
-        kind:       EsUsnEventKind::Rename,
-        file_ref:   8,
+        kind: EsUsnEventKind::Rename,
+        file_ref: 8,
         parent_ref: Some(6), // src/ 目录
-        name:       Some("library.rs".to_string()),
-        flags:      Some(0),
+        name: Some("library.rs".to_string()),
+        flags: Some(0),
     }];
     mgr.apply('C', &events, 300, 1);
 
@@ -409,13 +455,18 @@ fn usn_apply_bumps_generation() {
 
     let gen_before = mgr.generation();
 
-    mgr.apply('C', &[EsUsnEvent {
-        kind:       EsUsnEventKind::Create,
-        file_ref:   888,
-        parent_ref: Some(5),
-        name:       Some("new_file.txt".to_string()),
-        flags:      Some(0),
-    }], 400, 1);
+    mgr.apply(
+        'C',
+        &[EsUsnEvent {
+            kind: EsUsnEventKind::Create,
+            file_ref: 888,
+            parent_ref: Some(5),
+            name: Some("new_file.txt".to_string()),
+            flags: Some(0),
+        }],
+        400,
+        1,
+    );
 
     assert!(
         mgr.generation() > gen_before,
@@ -432,7 +483,8 @@ fn usn_apply_empty_events_does_not_bump_generation() {
     let gen_before = mgr.generation();
     mgr.apply('C', &[], 500, 1);
     assert_eq!(
-        mgr.generation(), gen_before,
+        mgr.generation(),
+        gen_before,
         "apply 空事件列表不应改变 generation"
     );
 }
@@ -485,7 +537,10 @@ fn usn_compact_preserves_effective_state_and_clears_delta() {
         .expect("snapshot should succeed");
     let drive = candidate.drive;
     let revision = candidate.revision;
-    let mut rebuilt = candidate.snapshot.rebuild().expect("rebuild should succeed");
+    let mut rebuilt = candidate
+        .snapshot
+        .rebuild()
+        .expect("rebuild should succeed");
     rebuilt.status.journal_id = candidate.journal_id;
     rebuilt.status.last_usn = candidate.last_usn;
 
@@ -496,7 +551,11 @@ fn usn_compact_preserves_effective_state_and_clears_delta() {
     assert_eq!(index.status.last_usn, 900);
     assert!(manager.search("temporary", 10).is_empty());
     let final_result = manager.search("final", 10);
-    assert!(final_result.iter().any(|result| result.path == r"C:\src\final.txt"));
+    assert!(
+        final_result
+            .iter()
+            .any(|result| result.path == r"C:\src\final.txt")
+    );
 }
 
 /// A compact result must not replace a drive changed by a later USN batch.
@@ -533,7 +592,12 @@ fn stale_compact_candidate_is_rejected() {
     );
 
     assert!(!manager.commit_compact(candidate.drive, candidate.revision, rebuilt));
-    assert!(manager.search("second", 10).iter().any(|result| result.name == "second.txt"));
+    assert!(
+        manager
+            .search("second", 10)
+            .iter()
+            .any(|result| result.name == "second.txt")
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -659,13 +723,19 @@ fn real_mft_create_file_appears_in_search() {
     use std::fs;
 
     let temp_dir = std::env::temp_dir();
-    let unique_name = format!("easysearch_test_{}_{}.tmp", std::process::id(), unique_suffix());
+    let unique_name = format!(
+        "easysearch_test_{}_{}.tmp",
+        std::process::id(),
+        unique_suffix()
+    );
     let test_file = temp_dir.join(&unique_name);
 
     // 确保测试 panic 时也能清理（RAII guard）
     struct CleanupGuard(std::path::PathBuf);
     impl Drop for CleanupGuard {
-        fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
     }
     let _guard = CleanupGuard(test_file.clone());
 
@@ -706,10 +776,7 @@ fn real_mft_create_file_appears_in_search() {
     // 关停引擎，让后台 USN 轮询线程退出，避免与后续测试争用资源。
     engine.shutdown();
 
-    assert!(
-        found,
-        "创建文件后 30 秒内应在搜索结果中找到 {unique_name}"
-    );
+    assert!(found, "创建文件后 30 秒内应在搜索结果中找到 {unique_name}");
 }
 
 #[test]
@@ -719,7 +786,11 @@ fn real_mft_delete_file_disappears_from_search() {
     use std::fs;
 
     let temp_dir = std::env::temp_dir();
-    let unique_name = format!("easysearch_del_{}_{}.tmp", std::process::id(), unique_suffix());
+    let unique_name = format!(
+        "easysearch_del_{}_{}.tmp",
+        std::process::id(),
+        unique_suffix()
+    );
     let test_file = temp_dir.join(&unique_name);
 
     let config = EngineConfig {
@@ -836,7 +907,10 @@ fn real_mft_rename_file_updates_search() {
     engine.shutdown();
 
     assert!(new_found, "重命名后 30 秒内应能搜到 new 名字 {new_name}");
-    assert!(old_gone, "重命名后 30 秒内 old 名字应从结果中消失 {old_name}");
+    assert!(
+        old_gone,
+        "重命名后 30 秒内 old 名字应从结果中消失 {old_name}"
+    );
 }
 
 #[test]
