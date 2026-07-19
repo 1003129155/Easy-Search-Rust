@@ -466,7 +466,7 @@ mod tests {
     /// Round-trip: build a header + table, save to temp file, load back.
     #[test]
     fn save_and_load_roundtrip() -> Result<()> {
-        let fold = uffs_text::case_fold::CaseFold::default_table();
+        let fold = crate::upcase_fold::CaseFold::default_table();
         let raw_table = fold.table();
         #[expect(
             clippy::large_stack_arrays,
@@ -520,12 +520,7 @@ mod tests {
     fn load_windows_captured_file() -> Result<()> {
         // The reference file lives next to the embedded default.
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let ref_path = manifest
-            .parent()
-            .ok_or_else(|| MftError::InvalidData("no parent dir".into()))?
-            .join("uffs-text")
-            .join("src")
-            .join("upcase_windows_c.bin");
+        let ref_path = manifest.join("src").join("upcase_windows_c.bin");
 
         if !ref_path.exists() {
             // Not fatal — the file is only present after a Windows capture.
@@ -540,7 +535,7 @@ mod tests {
         assert_eq!(hdr.table_crc32, 0xCEE8_CFFA);
 
         // Table must match the embedded default exactly.
-        let fold = uffs_text::case_fold::CaseFold::default_table();
+        let fold = crate::upcase_fold::CaseFold::default_table();
         let embedded = fold.table();
         assert_eq!(
             tbl.as_ref(),
@@ -560,7 +555,7 @@ mod tests {
     /// CRC-32 of the embedded default table must match the Windows capture.
     #[test]
     fn embedded_crc32_matches_windows() {
-        let fold = uffs_text::case_fold::CaseFold::default_table();
+        let fold = crate::upcase_fold::CaseFold::default_table();
         let raw: &[u8] = bytemuck::cast_slice(fold.table());
         let crc = crc32(raw);
         assert_eq!(

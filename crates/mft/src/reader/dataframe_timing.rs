@@ -8,7 +8,7 @@ use std::time::Instant;
 
 #[cfg(windows)]
 use tracing::{debug, info, warn};
-use uffs_polars::DataFrame;
+use polars::prelude::DataFrame;
 
 #[cfg(windows)]
 use super::PhaseTimings;

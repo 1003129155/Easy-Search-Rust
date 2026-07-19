@@ -153,7 +153,6 @@ pub(super) fn poll_deferred_results(app: &mut AppState) -> bool {
             Ok(plugin_results) => {
                 // Only accept results matching current seq_id
                 if dq.seq_id == app.current_search_seq {
-                    let query = app.input.text().to_string();
                     let new_items = plugin_results_to_display(plugin_results, &app.history);
 
                     // Apply history boost to immediate plugin items too
@@ -185,25 +184,7 @@ pub(super) fn poll_deferred_results(app: &mut AppState) -> bool {
                     // Final sort by score descending for display order
                     immediate_items.sort_by(|a, b| b.score.cmp(&a.score));
 
-                    // Move pinned items to the top
-                    let mut pinned = Vec::new();
-                    let mut unpinned = Vec::new();
-                    for item in immediate_items {
-                        let key = action_to_history_key_static(&item.action);
-                        if app.history.is_pinned(&query, &key) {
-                            pinned.push(item);
-                        } else {
-                            unpinned.push(item);
-                        }
-                    }
-                    pinned.sort_by_key(|item| {
-                        let key = action_to_history_key_static(&item.action);
-                        app.history
-                            .pinned_position(&query, &key)
-                            .unwrap_or(usize::MAX)
-                    });
-                    pinned.extend(unpinned);
-                    let mut all_items = pinned;
+                    let mut all_items = immediate_items;
 
                     // Reassign shortcut labels based on final position
                     for (i, item) in all_items.iter_mut().enumerate() {

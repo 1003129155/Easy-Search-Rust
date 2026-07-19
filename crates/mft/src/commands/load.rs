@@ -468,7 +468,7 @@ pub(crate) fn cmd_load(
         "csv" => {
             use std::fs::File;
 
-            use uffs_polars::{CsvWriter, SerWriter as _};
+            use polars::prelude::{CsvWriter, SerWriter as _};
 
             let file = File::create(output)?;
             CsvWriter::new(file).finish(&mut df)?;
@@ -693,7 +693,7 @@ fn cmd_load_iocp(
                     MftReader::save_parquet(&mut df, output).context("Failed to save Parquet")?;
                 }
                 "csv" => {
-                    use uffs_polars::{CsvWriter, SerWriter as _};
+                    use polars::prelude::{CsvWriter, SerWriter as _};
                     let file = std::fs::File::create(output)?;
                     CsvWriter::new(file)
                         .finish(&mut df)

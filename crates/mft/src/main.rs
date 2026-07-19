@@ -83,9 +83,7 @@ use thiserror as _;
 use tracing as _;
 #[cfg(not(windows))]
 use uffs_mft as _;
-use uffs_polars as _;
 use uffs_security as _;
-use uffs_text as _;
 use zerocopy as _;
 use zstd as _;
 // Benchmark dependencies (used by bench/bench-all commands on Windows)

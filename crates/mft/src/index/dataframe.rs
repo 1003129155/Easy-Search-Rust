@@ -44,8 +44,8 @@ impl MftIndex {
         clippy::too_many_lines,
         reason = "DataFrame construction has many columns"
     )]
-    pub fn to_dataframe(&self) -> crate::Result<uffs_polars::DataFrame> {
-        use uffs_polars::{DataType, IntoColumn as _, NamedFrom as _, Series, TimeUnit};
+    pub fn to_dataframe(&self) -> crate::Result<polars::prelude::DataFrame> {
+        use polars::prelude::{DataType, IntoColumn as _, NamedFrom as _, Series, TimeUnit};
         let n = self.records.len();
         // Pre-allocate all column vectors (35 columns in v5)
         let (mut frs, mut seq, mut lsn, mut parent, mut name, mut ns) = (
@@ -262,6 +262,6 @@ impl MftIndex {
         cols.push(Series::new("tree_allocated".into(), tree_allocated).into_column());
         cols.push(Series::new("path".into(), path).into_column());
 
-        uffs_polars::DataFrame::new_infer_height(cols).map_err(crate::MftError::from)
+        polars::prelude::DataFrame::new_infer_height(cols).map_err(crate::MftError::from)
     }
 }

@@ -111,7 +111,7 @@ pub(crate) fn cmd_inspect(path: &Path) -> Result<()> {
 }
 
 /// Count `true` values in a boolean column (0 if column is missing).
-fn count_bool(df: &uffs_polars::DataFrame, col: &str) -> u64 {
+fn count_bool(df: &polars::prelude::DataFrame, col: &str) -> u64 {
     df.column(col)
         .ok()
         .and_then(|series| series.bool().ok())
@@ -119,7 +119,7 @@ fn count_bool(df: &uffs_polars::DataFrame, col: &str) -> u64 {
 }
 
 /// Sum values in a `u64` column (0 if column is missing).
-fn sum_u64(df: &uffs_polars::DataFrame, col: &str) -> u64 {
+fn sum_u64(df: &polars::prelude::DataFrame, col: &str) -> u64 {
     df.column(col)
         .ok()
         .and_then(|series| series.u64().ok())
@@ -127,7 +127,7 @@ fn sum_u64(df: &uffs_polars::DataFrame, col: &str) -> u64 {
 }
 
 /// Count entries where a `u16` column value exceeds 1.
-fn count_multi_u16(df: &uffs_polars::DataFrame, col: &str) -> u64 {
+fn count_multi_u16(df: &polars::prelude::DataFrame, col: &str) -> u64 {
     df.column(col)
         .ok()
         .and_then(|series| series.u16().ok())

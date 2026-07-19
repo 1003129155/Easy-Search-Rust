@@ -12,8 +12,6 @@ path = "src/lib.rs"
 # [[bin]] 已移除 — easysearch-mft 仅作为 lib 供 engine 使用
 
 [dependencies]
-uffs-polars = { path = "../../_unused/uffs-polars" }
-uffs-text = { path = "../../_unused/uffs-text" }
 uffs-security = { package = "easysearch-security", path = "../security" }
 easysearch-core = { path = "../core" }
 
@@ -40,6 +38,15 @@ clap = { version = "4", features = ["derive"] }
 indicatif = "0.18"
 rand = "0.10"
 rand_chacha = "0.10"
+
+polars = { version = "0.54.4", default-features = false, features = [
+    "lazy", "streaming", "performant", "serde", "nightly", "simd",
+    "dtype-u8", "dtype-u16", "dtype-datetime", "dtype-array",
+    "strings", "regex", "find_many",
+    "temporal", "timezones",
+    "parquet", "json", "csv",
+    "is_in", "diff", "bitwise", "abs", "fmt",
+] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

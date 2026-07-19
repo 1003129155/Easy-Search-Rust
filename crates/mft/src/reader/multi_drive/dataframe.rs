@@ -6,7 +6,7 @@
 use alloc::sync::Arc;
 
 use tokio::task::JoinSet;
-use uffs_polars::{DataFrame, IntoLazy as _, col, lit};
+use polars::prelude::{DataFrame, IntoLazy as _, col, lit};
 
 use super::{DriveReadResult, MultiDriveMftReader, drive_reader_budget};
 use crate::error::{MftError, Result};
@@ -130,7 +130,7 @@ impl MultiDriveMftReader {
             .get_column_names()
             .into_iter()
             .filter(|name| name.as_str() != "drive")
-            .map(uffs_polars::PlSmallStr::to_string)
+            .map(polars::prelude::PlSmallStr::to_string)
             .collect();
         let columns: Vec<_> = core::iter::once("drive".to_owned())
             .chain(column_names)

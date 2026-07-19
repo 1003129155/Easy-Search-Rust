@@ -202,9 +202,6 @@ use tokio as _;
 use tracing as _;
 use tracing_appender as _;
 use tracing_subscriber as _;
-#[cfg(not(windows))]
-use uffs_polars as _;
-use uffs_text as _;
 #[cfg(windows)]
 use windows as _;
 
@@ -245,6 +242,9 @@ pub mod cache;
 
 mod reader;
 
+/// NTFS-compatible case folding via the `$UpCase` table.
+pub mod upcase_fold;
+
 // WI-7.1 — pathological-name parity corpus (Tier 1 decoder pins + Tier 2
 // offline-capture-vs-golden). Crate-internal so it can reach the `pub(crate)`
 // instrumented decoder; test-only.
@@ -257,7 +257,7 @@ mod parity_tests;
 // ============================================================================
 
 // Re-export cache types.  `load_or_build_dataframe_cached` is Windows-only
-// (depends on the `uffs_polars::DataFrame` build) and gated below.
+// (depends on the `polars::prelude::DataFrame` build) and gated below.
 #[cfg(windows)]
 pub use cache::load_or_build_dataframe_cached;
 pub use cache::{

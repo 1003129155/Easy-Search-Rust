@@ -3,7 +3,7 @@
 
 //! Multi-drive reader orchestration and cache/update helpers.
 
-use uffs_polars::DataFrame;
+use polars::prelude::DataFrame;
 
 use crate::error::MftError;
 #[cfg(not(windows))]

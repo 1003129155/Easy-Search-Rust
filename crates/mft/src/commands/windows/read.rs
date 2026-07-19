@@ -145,7 +145,7 @@ fn open_reader_with_logging(
 /// Drive [`MftReader::read_all`], compute the records-per-second rate,
 /// and trace the read summary.  Returns the assembled [`DataFrame`]
 /// alongside its row count.
-fn read_records_with_logging(reader: &MftReader) -> Result<(uffs_polars::DataFrame, usize)> {
+fn read_records_with_logging(reader: &MftReader) -> Result<(polars::prelude::DataFrame, usize)> {
     use std::time::Instant;
 
     use tracing::debug;
@@ -180,7 +180,7 @@ fn read_records_with_logging(reader: &MftReader) -> Result<(uffs_polars::DataFra
 /// Persist `df` to `output` and emit the corresponding tracing line;
 /// returns the on-disk file size for the final summary.
 fn save_dataframe_with_logging(
-    df: &mut uffs_polars::DataFrame,
+    df: &mut polars::prelude::DataFrame,
     output: &std::path::Path,
 ) -> Result<u64> {
     use std::time::Instant;

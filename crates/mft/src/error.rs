@@ -108,7 +108,7 @@ pub enum MftError {
 
     /// Polars error during `DataFrame` operations.
     #[error("DataFrame error: {0}")]
-    Polars(#[from] uffs_polars::PolarsError),
+    Polars(#[from] polars::prelude::PolarsError),
 
     /// Parquet file error.
     #[error("Parquet error: {0}")]

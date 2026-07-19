@@ -12,8 +12,7 @@ members = [
     "crates/app",               # ★ 主程序（前后端一体化单 exe，产物名: easysearch.exe）
     # "crates/daemon",          # 独立守护进程（已废弃，功能已内嵌到 app）
 
-    # 注: _unused/uffs-polars 和 _unused/uffs-text 是 mft crate 的内部路径依赖，
-    # 不作为 workspace 成员。它们是从 UFFS 项目移植的代码，保留原名以避免改动 6000+ 行 use 语句。
+    # 原 `_unused` 辅助 crate 已合并到 `crates/mft`。
 
     # ── 插件 ──
     "crates/plugins/plugin-bookmark",

@@ -41,7 +41,7 @@ use super::{load_cached_index, save_to_cache_background};
 pub async fn load_or_build_dataframe_cached(
     drive: crate::platform::DriveLetter,
     ttl_seconds: u64,
-) -> crate::Result<uffs_polars::DataFrame> {
+) -> crate::Result<polars::prelude::DataFrame> {
     tracing::debug!(drive = %drive, ttl_seconds, "Entering cached DataFrame load/build");
     let result = tokio::task::spawn_blocking(move || {
         tracing::debug!(
@@ -70,7 +70,7 @@ pub async fn load_or_build_dataframe_cached(
 fn load_or_build_dataframe_cached_sync(
     drive: crate::platform::DriveLetter,
     ttl_seconds: u64,
-) -> crate::Result<uffs_polars::DataFrame> {
+) -> crate::Result<polars::prelude::DataFrame> {
     tracing::debug!(
         drive = %drive,
         ttl_seconds,
@@ -91,7 +91,7 @@ fn load_or_build_dataframe_cached_sync(
 fn load_cached_dataframe(
     drive: crate::platform::DriveLetter,
     ttl_seconds: u64,
-) -> Option<crate::Result<uffs_polars::DataFrame>> {
+) -> Option<crate::Result<polars::prelude::DataFrame>> {
     let (index, _header) = load_cached_index(drive, ttl_seconds)?;
     tracing::info!(
         drive = %drive,
@@ -108,7 +108,7 @@ fn load_cached_dataframe(
 #[cfg(windows)]
 fn build_fresh_dataframe(
     drive: crate::platform::DriveLetter,
-) -> crate::Result<uffs_polars::DataFrame> {
+) -> crate::Result<polars::prelude::DataFrame> {
     let index = read_fresh_index(drive)?;
     spawn_cache_save(drive, &index)?;
 
@@ -173,7 +173,7 @@ fn spawn_cache_save(
 #[cfg(windows)]
 fn log_conversion_result(
     drive: crate::platform::DriveLetter,
-    df: &crate::Result<uffs_polars::DataFrame>,
+    df: &crate::Result<polars::prelude::DataFrame>,
     source: &'static str,
 ) {
     match df {

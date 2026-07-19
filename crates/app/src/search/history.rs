@@ -26,14 +26,10 @@ pub struct RecentItem {
 }
 
 /// History store mapping action keys to execution counts,
-/// plus a set of pinned (top-most) items per query,
 /// plus recent items with full display metadata.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct History {
     entries: HashMap<String, u32>,
-    /// Pinned items: maps query (lowercased) → list of action keys that are pinned.
-    #[serde(default)]
-    pinned: HashMap<String, Vec<String>>,
     /// Recently used items with display metadata, sorted by count desc.
     #[serde(default)]
     recent: Vec<RecentItem>,
@@ -58,7 +54,14 @@ impl History {
     /// Record a full item execution with display metadata for the home screen.
     /// Items are kept in chronological order (newest last in storage,
     /// reversed on display so newest appears first).
-    pub fn record_full(&mut self, key: &str, title: &str, subtitle: &str, icon: &str, is_directory: bool) {
+    pub fn record_full(
+        &mut self,
+        key: &str,
+        title: &str,
+        subtitle: &str,
+        icon: &str,
+        is_directory: bool,
+    ) {
         self.record(key);
 
         // Remove existing entry for this action key (dedup by key).
@@ -114,39 +117,6 @@ impl History {
             30..=99 => 80,
             _ => 100,
         }
-    }
-
-    /// Pin an item for a specific query (top-most).
-    pub fn pin(&mut self, query: &str, action_key: &str) {
-        let q = query.to_lowercase();
-        let list = self.pinned.entry(q).or_default();
-        if !list.contains(&action_key.to_string()) {
-            list.push(action_key.to_string());
-        }
-    }
-
-    /// Unpin an item.
-    pub fn unpin(&mut self, query: &str, action_key: &str) {
-        let q = query.to_lowercase();
-        if let Some(list) = self.pinned.get_mut(&q) {
-            list.retain(|k| k != action_key);
-        }
-    }
-
-    /// Check if an item is pinned for a given query.
-    pub fn is_pinned(&self, query: &str, action_key: &str) -> bool {
-        let q = query.to_lowercase();
-        self.pinned
-            .get(&q)
-            .map_or(false, |list| list.contains(&action_key.to_string()))
-    }
-
-    /// Get pinned position (0-based) for an item, or None if not pinned.
-    pub fn pinned_position(&self, query: &str, action_key: &str) -> Option<usize> {
-        let q = query.to_lowercase();
-        self.pinned
-            .get(&q)
-            .and_then(|list| list.iter().position(|k| k == action_key))
     }
 }
 
@@ -250,41 +220,14 @@ mod tests {
     }
 
     #[test]
-    fn pin_unpin_and_query_case_insensitive() {
-        let mut h = History::default();
-        assert!(!h.is_pinned("Foo", "open:a"));
-
-        h.pin("Foo", "open:a");
-        // Query matching is case-insensitive.
-        assert!(h.is_pinned("foo", "open:a"));
-        assert!(h.is_pinned("FOO", "open:a"));
-        assert_eq!(h.pinned_position("foo", "open:a"), Some(0));
-
-        // Pinning again is idempotent (no duplicates).
-        h.pin("foo", "open:a");
-        assert_eq!(h.pinned_position("foo", "open:a"), Some(0));
-
-        h.pin("foo", "open:b");
-        assert_eq!(h.pinned_position("foo", "open:b"), Some(1));
-
-        h.unpin("FOO", "open:a");
-        assert!(!h.is_pinned("foo", "open:a"));
-        // Remaining item shifts position.
-        assert_eq!(h.pinned_position("foo", "open:b"), Some(0));
-    }
-
-    #[test]
     fn serde_roundtrip_preserves_state() {
         let mut h = History::default();
         h.record_full("open:a", "A", "subA", "iconA", true);
         h.record("open:a");
-        h.pin("query", "open:a");
-
         let json = serde_json::to_string(&h).unwrap();
         let restored: History = serde_json::from_str(&json).unwrap();
 
         assert_eq!(restored.count("open:a"), 2);
-        assert!(restored.is_pinned("query", "open:a"));
         let recent = restored.top_recent(1);
         assert_eq!(recent[0].title, "A");
         assert_eq!(recent[0].is_directory, true);
@@ -292,11 +235,17 @@ mod tests {
 
     #[test]
     fn deserialize_partial_json_fills_defaults() {
-        // Old format with only `entries` — pinned/recent should default.
+        // Old format with only `entries` — recent should default.
         let json = r#"{"entries":{"open:x":5}}"#;
         let h: History = serde_json::from_str(json).unwrap();
         assert_eq!(h.count("open:x"), 5);
         assert!(h.top_recent(10).is_empty());
-        assert!(!h.is_pinned("q", "open:x"));
+    }
+
+    #[test]
+    fn deserialize_legacy_pinned_data_ignores_removed_field() {
+        let json = r#"{"entries":{"open:x":5},"pinned":{"query":["open:x"]}}"#;
+        let h: History = serde_json::from_str(json).unwrap();
+        assert_eq!(h.count("open:x"), 5);
     }
 }
