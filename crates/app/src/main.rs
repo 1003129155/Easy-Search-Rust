@@ -5,6 +5,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod i18n;
+#[cfg(windows)]
+mod process_hardening;
 mod search;
 mod settings;
 mod shared;
@@ -22,7 +24,36 @@ use theme::engine::ThemeEngine;
 pub static SHARED_SETTINGS: std::sync::OnceLock<Arc<RwLock<Settings>>> = std::sync::OnceLock::new();
 
 fn main() {
+    #[cfg(windows)]
+    if let Err(error) = process_hardening::apply_compatible_policy() {
+        // The release binary has no console, so make a fail-closed startup
+        // error visible before any application window is created.
+        use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+        use windows::core::PCWSTR;
+
+        let message: Vec<u16> =
+            format!("EasySearch could not apply its process security policy:\n{error}\0")
+                .encode_utf16()
+                .collect();
+        let title: Vec<u16> = "EasySearch Security Error\0".encode_utf16().collect();
+        // SAFETY: both UTF-16 buffers are null-terminated and remain alive for
+        // the duration of this modal call.
+        unsafe {
+            MessageBoxW(
+                None,
+                PCWSTR(message.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                MB_OK | MB_ICONERROR,
+            );
+        }
+        std::process::exit(1);
+    }
+
     easysearch_core::logging::init();
+    #[cfg(windows)]
+    log_info!(
+        "Process hardening active (restricted DLL search, remote/low-integrity images blocked, legacy extension points disabled)"
+    );
 
     // Set up panic hook to log panics to file
     std::panic::set_hook(Box::new(|info| {
