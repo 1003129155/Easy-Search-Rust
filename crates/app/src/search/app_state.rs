@@ -73,14 +73,16 @@ pub(super) struct AppState {
     pub(super) history: super::history::History,
     /// Internationalization strings.
     pub(super) i18n: crate::i18n::engine::I18nEngine,
-    /// Icon cache for rendering file/folder icons.
-    pub(super) icon_cache: super::icon::IconCache,
     /// Animation progress for result list (0 = start, ANIM_TOTAL_FRAMES = done).
     pub(super) anim_frame: u8,
     /// True while a debounced or background search is in flight.
     pub(super) search_active: bool,
-    /// Last window size applied via SetWindowPos, used to avoid redundant resizes.
+    /// Tracks whether the coalesced progress/icon animation timer is armed.
+    pub(super) busy_timer_running: bool,
+    /// Actual client size most recently observed through `WM_SIZE`.
     pub(super) last_window_size: (i32, i32),
+    /// Latest layout-driven size waiting to be applied outside the state borrow.
+    pub(super) pending_window_size: Option<(i32, i32)>,
     /// Engine reference for hot-plug drive management.
     pub(super) engine: Option<std::sync::Arc<easysearch_engine::SearchEngine>>,
     /// Preview info loaded asynchronously when context actions are opened.

@@ -6,7 +6,7 @@
 #[cfg(windows)]
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 #[cfg(windows)]
-use windows::Win32::Graphics::Gdi::{ScreenToClient, ValidateRect};
+use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT, ScreenToClient};
 #[cfg(windows)]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 #[cfg(windows)]
@@ -30,7 +30,7 @@ use super::layout;
 #[cfg(windows)]
 use super::messages::*;
 #[cfg(windows)]
-use super::plugin_bridge::{action_to_history_key_static, build_plugin_router};
+use super::plugin_bridge::build_plugin_router;
 #[cfg(windows)]
 use super::renderer::Renderer;
 #[cfg(windows)]
@@ -63,7 +63,6 @@ pub fn run() -> Result<(), String> {
     let class_name = wide_null(CLASS_NAME);
     let wc = WNDCLASSEXW {
         cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-        style: CS_HREDRAW | CS_VREDRAW,
         lpfnWndProc: Some(wnd_proc),
         hInstance: hinstance.into(),
         lpszClassName: PCWSTR(class_name.as_ptr()),
@@ -120,15 +119,19 @@ pub fn run() -> Result<(), String> {
         }
     }
 
-    // Initialize renderer
-    let mut renderer = Renderer::new()?;
-    easysearch_core::log_debug!("Renderer created");
-    renderer.create_render_target(hwnd, actual_width as u32, actual_height as u32)?;
     let initial_dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) };
-    renderer.set_dpi(initial_dpi, initial_dpi);
-    easysearch_core::log_debug!("Render target created");
+    // Initialize device-independent and device-dependent renderer resources.
+    let renderer = Renderer::new(
+        hwnd,
+        actual_width as u32,
+        actual_height as u32,
+        initial_dpi,
+        initial_dpi,
+    )?;
+    easysearch_core::log_debug!("Renderer and device resources created");
 
-    // Apply DWM window styling (Win11 round corners + shadow)
+    // Apply the supported Win11 corner preference. The client area itself is
+    // fully opaque, so it must not be configured as full-window DWM glass.
     apply_dwm_style(hwnd);
     easysearch_core::log_debug!("DWM style applied");
     // Register global hotkey
@@ -195,10 +198,11 @@ pub fn run() -> Result<(), String> {
                 _ => crate::i18n::engine::I18nEngine::new(),
             }
         },
-        icon_cache: super::icon::IconCache::new(),
         anim_frame: ANIM_TOTAL_FRAMES, // Start fully visible (no animation on first load)
         search_active: false,
+        busy_timer_running: false,
         last_window_size: (actual_width, actual_height),
+        pending_window_size: None,
         engine: Some(engine_for_search.clone()),
         preview: None,
         preview_seq: 0,
@@ -214,9 +218,6 @@ pub fn run() -> Result<(), String> {
     unsafe {
         let _ = SetTimer(Some(hwnd), SETTINGS_POLL_TIMER_ID, SETTINGS_POLL_MS, None);
     }
-
-    // Initial render
-    do_render();
 
     // Message loop
     let mut msg = MSG::default();
@@ -527,7 +528,7 @@ unsafe extern "system" fn wnd_proc(
                             app.input.insert_char(ch);
                             on_input_changed(app);
                         });
-                        do_render();
+                        request_render();
                     }
                 }
             }
@@ -590,7 +591,7 @@ unsafe extern "system" fn wnd_proc(
                                 app.input.insert_str(&text);
                                 on_input_changed(app);
                             });
-                            do_render();
+                            request_render();
                         }
                         let _ = ImmReleaseContext(hwnd, himc);
                     }
@@ -653,9 +654,11 @@ unsafe extern "system" fn wnd_proc(
         }
 
         WM_PAINT => {
-            do_render();
             unsafe {
-                let _ = ValidateRect(Some(hwnd), None);
+                let mut paint = PAINTSTRUCT::default();
+                let _ = BeginPaint(hwnd, &mut paint);
+                super::render_bridge::render_now(hwnd);
+                let _ = EndPaint(hwnd, &paint);
             }
             LRESULT(0)
         }
@@ -663,9 +666,44 @@ unsafe extern "system" fn wnd_proc(
         WM_SIZE => {
             let width = (lparam.0 as u32) & 0xFFFF;
             let height = ((lparam.0 as u32) >> 16) & 0xFFFF;
-            app_state::with_app_mut(|app| {
-                app.renderer.resize(width, height);
-            });
+            let changed = width > 0
+                && height > 0
+                && app_state::with_app_mut(|app| {
+                    let size = (width as i32, height as i32);
+                    if app.last_window_size == size {
+                        return false;
+                    }
+                    app.last_window_size = size;
+                    app.renderer.resize(width, height);
+                    true
+                })
+                .unwrap_or(false);
+            if changed {
+                request_render();
+            }
+            LRESULT(0)
+        }
+
+        m if m == WM_APPLY_WINDOW_SIZE => {
+            let pending = app_state::with_app_mut(|app| {
+                app.pending_window_size.take().map(|size| (app.hwnd, size))
+            })
+            .flatten();
+
+            if let Some((target_hwnd, (width, height))) = pending {
+                unsafe {
+                    let _ = SetWindowPos(
+                        target_hwnd,
+                        None,
+                        0,
+                        0,
+                        width,
+                        height,
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
+                request_render();
+            }
             LRESULT(0)
         }
 
@@ -678,19 +716,31 @@ unsafe extern "system" fn wnd_proc(
                 app_state::with_app_mut(|app| {
                     run_debounced_search(app);
                 });
-                do_render();
+                request_render();
             } else if wparam.0 == BUSY_ANIM_TIMER_ID {
-                let keep_running = app_state::with_app_mut(|app| {
+                let timer_state = app_state::with_app_mut(|app| {
                     app.anim_frame = app.anim_frame.wrapping_add(1) % ANIM_TOTAL_FRAMES;
-                    app.search_active || app.icon_cache.has_pending_loads()
-                })
-                .unwrap_or(false);
-                if !keep_running {
-                    unsafe {
-                        let _ = KillTimer(Some(hwnd), BUSY_ANIM_TIMER_ID);
+                    let keep_running = app.search_active || app.renderer.has_pending_icon_loads();
+                    if !keep_running {
+                        app.busy_timer_running = false;
+                    }
+                    (keep_running, app.visible)
+                });
+                if let Some((keep_running, is_visible)) = timer_state {
+                    if !keep_running {
+                        unsafe {
+                            let _ = KillTimer(Some(hwnd), BUSY_ANIM_TIMER_ID);
+                        }
+                    }
+                    // Paint once on the final tick as well. A completion from
+                    // an older search sequence can still satisfy an icon
+                    // requested by the current results, while its message is
+                    // intentionally not allowed to trigger an immediate
+                    // stale-sequence paint.
+                    if is_visible {
+                        request_render();
                     }
                 }
-                do_render();
             } else if wparam.0 == DEFERRED_POLL_TIMER_ID {
                 // Poll for background plugin results (FileSearch)
                 let should_stop =
@@ -705,7 +755,7 @@ unsafe extern "system" fn wnd_proc(
                     unsafe {
                         let _ = KillTimer(Some(hwnd), DEFERRED_POLL_TIMER_ID);
                     }
-                    do_render();
+                    request_render();
                 }
             } else if wparam.0 == ANIM_TIMER_ID {
                 // Advance animation frame
@@ -719,7 +769,12 @@ unsafe extern "system" fn wnd_proc(
                         let _ = KillTimer(Some(hwnd), ANIM_TIMER_ID);
                     }
                 }
-                do_render();
+                request_render();
+            } else if wparam.0 == RENDER_RETRY_TIMER_ID {
+                unsafe {
+                    let _ = KillTimer(Some(hwnd), RENDER_RETRY_TIMER_ID);
+                }
+                request_render();
             } else if wparam.0 == SETTINGS_POLL_TIMER_ID {
                 poll_settings_changes(hwnd);
             }
@@ -739,7 +794,7 @@ unsafe extern "system" fn wnd_proc(
                     resize_for_results(app);
                 }
             });
-            do_render();
+            request_render();
             LRESULT(0)
         }
 
@@ -747,16 +802,18 @@ unsafe extern "system" fn wnd_proc(
         m if m == WM_ICON_READY => {
             let ptr = lparam.0 as *mut IconReadyPayload;
             let payload = unsafe { Box::from_raw(ptr) };
+            let IconReadyPayload {
+                request,
+                pixels,
+                seq_id,
+            } = *payload;
             let should_render = app_state::with_app_mut(|app| {
-                if let Some(rt) = app.renderer.render_target.clone() {
-                    app.icon_cache
-                        .finish_load(payload.request, payload.pixels, &rt);
-                }
-                payload.seq_id == app.current_search_seq && app.visible
+                app.renderer.finish_icon_load(request, pixels);
+                seq_id == app.current_search_seq && app.visible
             })
             .unwrap_or(false);
             if should_render {
-                do_render();
+                request_render();
             }
             LRESULT(0)
         }
@@ -767,7 +824,7 @@ unsafe extern "system" fn wnd_proc(
                 app.index_status.clear();
                 app.index_error = None;
             });
-            do_render();
+            request_render();
             LRESULT(0)
         }
 
@@ -824,7 +881,7 @@ unsafe extern "system" fn wnd_proc(
                 }
                 _ => {}
             });
-            do_render();
+            request_render();
             LRESULT(0)
         }
 
@@ -835,15 +892,21 @@ unsafe extern "system" fn wnd_proc(
 
         // ── DPI change detection (monitor switch / user settings change) ────
         WM_DPICHANGED => {
-            // lparam contains a pointer to a RECT with the suggested new position
-            let suggested_rect = unsafe { &*(lparam.0 as *const RECT) };
+            // lparam contains a pointer to a RECT with the suggested new position.
+            let suggested_rect = unsafe { *(lparam.0 as *const RECT) };
             let dpi_x = (wparam.0 as u32) & 0xFFFF;
             let dpi_y = ((wparam.0 as u32) >> 16) & 0xFFFF;
             let dpi_factor = dpi_x as f32 / 96.0;
+            let is_visible = unsafe { IsWindowVisible(hwnd) }.as_bool();
 
             // Use the DPI carried by the message. This avoids depending on when
             // GetDpiForWindow starts reporting the new value during dispatch.
-            app_state::with_app_mut(|app| {
+            let target_size = app_state::with_app_mut(|app| {
+                // A queued size was calculated at the old DPI. Its posted
+                // message will observe None and become a no-op.
+                app.pending_window_size = None;
+                app.renderer.set_dpi(dpi_x, dpi_y);
+
                 let has_preview =
                     app.preview.is_some() && app.view_mode == ViewMode::ContextActions;
                 let new_width = layout::scale_with(layout::WINDOW_WIDTH, dpi_factor);
@@ -851,11 +914,16 @@ unsafe extern "system" fn wnd_proc(
                     layout::window_height_with_preview(app.items.len(), has_preview),
                     dpi_factor,
                 );
+                (app.hwnd, new_width, new_height)
+            });
 
-                // Use suggested position from Windows, but our own calculated size
+            // The hidden monitor-probe step in `show_window_safe` is followed
+            // immediately by its final DPI-correct SetWindowPos. A live visible
+            // DPI change accepts Windows' suggested position here.
+            if is_visible && let Some((target_hwnd, new_width, new_height)) = target_size {
                 unsafe {
                     let _ = SetWindowPos(
-                        app.hwnd,
+                        target_hwnd,
                         None,
                         suggested_rect.left,
                         suggested_rect.top,
@@ -864,13 +932,6 @@ unsafe extern "system" fn wnd_proc(
                         SWP_NOZORDER | SWP_NOACTIVATE,
                     );
                 }
-
-                // SetDpi is the essential part of a live scale change. Resize()
-                // only changes the backing pixel dimensions and otherwise leaves
-                // Direct2D drawing with the old DIP-to-pixel conversion.
-                app.renderer.set_dpi(dpi_x, dpi_y);
-                app.renderer.resize(new_width as u32, new_height as u32);
-                app.last_window_size = (new_width, new_height);
                 easysearch_core::log_debug!(
                     "WM_DPICHANGED: dpi={}x{}, resized to {}x{}",
                     dpi_x,
@@ -878,9 +939,8 @@ unsafe extern "system" fn wnd_proc(
                     new_width,
                     new_height
                 );
-            });
-
-            do_render();
+                request_render();
+            }
             LRESULT(0)
         }
 
@@ -891,7 +951,7 @@ unsafe extern "system" fn wnd_proc(
             app_state::with_app_mut(|app| {
                 app.renderer.theme = crate::theme::Theme::system();
             });
-            do_render();
+            request_render();
             LRESULT(0)
         }
 
@@ -915,6 +975,7 @@ unsafe extern "system" fn wnd_proc(
                         crate::settings::open_settings_file(settings.clone());
                     }
                 }
+                tray::IDM_CLEAR_CACHE_REBUILD => super::cache_actions::clear_cache_and_rebuild(),
                 tray::IDM_EXIT => unsafe {
                     DestroyWindow(hwnd).ok();
                 },
@@ -970,7 +1031,7 @@ unsafe extern "system" fn wnd_proc(
                 _ => {}
             }
 
-            do_render();
+            request_render();
             LRESULT(0)
         }
 
@@ -992,7 +1053,7 @@ unsafe extern "system" fn wnd_proc(
             .unwrap_or(false);
 
             if changed {
-                do_render();
+                request_render();
             }
             LRESULT(0)
         }
@@ -1033,7 +1094,7 @@ unsafe extern "system" fn wnd_proc(
             .unwrap_or(false);
 
             if changed {
-                do_render();
+                request_render();
             }
             LRESULT(0)
         }
@@ -1088,7 +1149,7 @@ fn handle_keydown(wparam: WPARAM) -> bool {
         super::key_command::DeferredAction::None => {}
     }
 
-    do_render();
+    request_render();
     handled
 }
 
@@ -1122,29 +1183,6 @@ fn toggle_visibility() {
 #[cfg(windows)]
 fn hide_window() {
     super::visibility::hide_window();
-}
-
-/// Execute the currently selected item.
-#[cfg(windows)]
-#[allow(dead_code)]
-fn execute_selected(app: &mut AppState) {
-    if app.items.is_empty() {
-        return;
-    }
-
-    let idx = app.selected_index.min(app.items.len() - 1);
-    let action = app.items[idx].action.clone();
-
-    // Record usage for frequency-based ranking
-    let history_key = action_to_history_key_static(&action);
-    app.history.record(&history_key);
-    app.history.save();
-
-    // Hide window first
-    super::visibility::hide_window_inner(app);
-
-    // Execute the action
-    super::action::execute(&action);
 }
 
 // Preview functionality removed — fs::metadata on UI thread caused sluggishness.
@@ -1187,14 +1225,14 @@ fn poll_settings_changes(hwnd: HWND) {
                 *guard = on_disk;
             }
         }
-        do_render();
+        request_render();
     }
 }
 
 /// Trigger a re-render.
 #[cfg(windows)]
-fn do_render() {
-    super::render_bridge::do_render();
+fn request_render() {
+    super::render_bridge::request_render();
 }
 
 /// Convert &str to null-terminated wide string.
@@ -1203,14 +1241,12 @@ fn wide_null(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Apply DWM attributes for round corners and shadow (Windows 11+).
+/// Apply the DWM round-corner preference (Windows 11+).
 #[cfg(windows)]
 fn apply_dwm_style(hwnd: HWND) {
     use windows::Win32::Graphics::Dwm::{
-        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmExtendFrameIntoClientArea,
-        DwmSetWindowAttribute,
+        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
     };
-    use windows::Win32::UI::Controls::MARGINS;
 
     // Round corners (Win11)
     let preference = DWMWCP_ROUND.0 as u32;
@@ -1221,16 +1257,5 @@ fn apply_dwm_style(hwnd: HWND) {
             std::ptr::from_ref(&preference) as *const _,
             std::mem::size_of::<u32>() as u32,
         );
-    }
-
-    // Extend frame into client area for shadow effect
-    let margins = MARGINS {
-        cxLeftWidth: -1,
-        cxRightWidth: -1,
-        cyTopHeight: -1,
-        cyBottomHeight: -1,
-    };
-    unsafe {
-        let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
     }
 }

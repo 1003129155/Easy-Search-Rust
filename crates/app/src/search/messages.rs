@@ -25,6 +25,11 @@ pub(crate) const WM_ICON_READY: u32 = WM_APP + 5;
 #[cfg(windows)]
 pub(crate) const WM_DEACTIVATE_CHECK: u32 = WM_APP + 6;
 
+/// Applies the latest coalesced layout-driven window size outside an
+/// `AppState` borrow, allowing the synchronous `WM_SIZE` to run normally.
+#[cfg(windows)]
+pub(crate) const WM_APPLY_WINDOW_SIZE: u32 = WM_APP + 7;
+
 /// Deferred result poll timer ID.
 #[cfg(windows)]
 pub(crate) const DEFERRED_POLL_TIMER_ID: usize = 100;
@@ -49,6 +54,10 @@ pub(crate) const SEARCH_DEBOUNCE_TIMER_ID: usize = 103;
 #[cfg(windows)]
 pub(crate) const BUSY_ANIM_TIMER_ID: usize = 104;
 
+/// Backoff timer used only after a Direct2D frame cannot be recovered inline.
+#[cfg(windows)]
+pub(crate) const RENDER_RETRY_TIMER_ID: usize = 105;
+
 #[cfg(windows)]
 pub(crate) const SETTINGS_POLL_MS: u32 = 2000;
 
@@ -58,6 +67,10 @@ pub(crate) const SEARCH_DEBOUNCE_MS: u32 = 100;
 /// Lightweight progress/icon animation interval (~30fps).
 #[cfg(windows)]
 pub(crate) const ANIM_FRAME_MS: u32 = 33;
+
+/// Avoid a hot `WM_PAINT` loop while the graphics device is unavailable.
+#[cfg(windows)]
+pub(crate) const RENDER_RETRY_MS: u32 = 250;
 
 /// Animation duration in frames.
 #[cfg(windows)]

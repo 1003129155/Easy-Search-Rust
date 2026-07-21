@@ -894,6 +894,7 @@ dependencies = [
  "bytemuck",
  "chrono",
  "dirs",
+ "easysearch-security",
  "serde",
  "tempfile",
  "tracing",
@@ -956,7 +957,6 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "dirs-next",
- "easysearch-core",
  "libc",
  "memmap2",
  "rand 0.10.1",

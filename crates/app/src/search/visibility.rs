@@ -6,7 +6,9 @@
 //! message dispatch. All functions access state through `app_state::with_app_*`.
 
 #[cfg(windows)]
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, RECT};
+#[cfg(windows)]
+use windows::Win32::Graphics::Gdi::UpdateWindow;
 #[cfg(windows)]
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 #[cfg(windows)]
@@ -67,6 +69,7 @@ pub(super) fn show_window_safe(hwnd: HWND) {
         // Set visible=true BEFORE Win32 calls so that any WM_ACTIVATE(WA_INACTIVE)
         // triggered during show sequence will correctly see visible==true and hide.
         app.visible = true;
+        app.pending_window_size = None;
         app.items.len()
     })
     .unwrap_or(0);
@@ -100,8 +103,32 @@ pub(super) fn show_window_safe(hwnd: HWND) {
         let mon_width = work.right - work.left;
         let mon_height = work.bottom - work.top;
 
-        let width = layout::window_width_scaled(hwnd);
-        let height = layout::window_height_scaled(item_count, hwnd);
+        // Move the still-hidden HWND onto the target monitor without changing
+        // its size. Center the existing window for this probe: positioning its
+        // top-left at the monitor center can leave most of a wide, high-DPI
+        // window on an adjacent display and report that display's DPI.
+        let mut current_rect = RECT::default();
+        let _ = GetWindowRect(hwnd, &mut current_rect);
+        let current_width = (current_rect.right - current_rect.left).max(1);
+        let current_height = (current_rect.bottom - current_rect.top).max(1);
+        let probe_x = work.left + (mon_width - current_width) / 2;
+        let probe_y = work.top + (mon_height - current_height) / 2;
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            probe_x,
+            probe_y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
+        );
+
+        let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96);
+        let dpi_factor = dpi as f32 / 96.0;
+        app_state::with_app_mut(|app| app.renderer.set_dpi(dpi, dpi));
+
+        let width = layout::scale_with(layout::WINDOW_WIDTH, dpi_factor);
+        let height = layout::scale_with(layout::window_height(item_count), dpi_factor);
         let x = work.left + (mon_width - width) / 2;
         let y = work.top + mon_height / 4;
 
@@ -118,11 +145,10 @@ pub(super) fn show_window_safe(hwnd: HWND) {
             SWP_NOACTIVATE,
         );
 
-        // Pre-render content BEFORE showing the window so the first visible
-        // frame already has a fully-painted client area (avoids the "border
-        // appears before content" flash).
-        easysearch_core::log_debug!("show_window_safe: pre-render before ShowWindow");
-        super::render_bridge::do_render();
+        // Queue one paint before showing. `show_window_and_activate` dispatches
+        // that same WM_PAINT immediately after ShowWindow returns, after all
+        // size/DPI messages have settled and before explicit focus work.
+        super::render_bridge::request_render();
 
         easysearch_core::log_debug!("show_window_safe: show and force foreground focus");
         show_window_and_activate(hwnd);
@@ -143,7 +169,8 @@ pub(super) fn show_window_safe(hwnd: HWND) {
 /// Show the popup and activate it while the foreground input queue is
 /// attached. `ShowWindow(SW_SHOW)` is deliberately performed inside the
 /// attachment window so its synchronous activation messages use the same
-/// input queue as the foreground application.
+/// input queue as the foreground application. Flush the already-coalesced
+/// first paint before doing the remaining foreground/focus work.
 #[cfg(windows)]
 unsafe fn show_window_and_activate(hwnd: HWND) {
     unsafe {
@@ -161,6 +188,7 @@ unsafe fn show_window_and_activate(hwnd: HWND) {
         }
 
         let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = UpdateWindow(hwnd);
         let _ = SetForegroundWindow(hwnd);
         let _ = SetFocus(Some(hwnd));
 
@@ -170,41 +198,6 @@ unsafe fn show_window_and_activate(hwnd: HWND) {
 
         easysearch_core::log_debug!(
             "show_window_and_activate: foreground={}",
-            GetForegroundWindow() == hwnd
-        );
-    }
-}
-
-/// Force a window to the foreground, working around Windows' restrictions.
-///
-/// `SetForegroundWindow` can silently fail if the calling thread doesn't hold
-/// the "foreground lock." Temporarily attaching our input queue to the current
-/// foreground thread lets us activate and focus the popup before detaching.
-#[cfg(windows)]
-unsafe fn force_foreground(hwnd: HWND) {
-    unsafe {
-        let foreground = GetForegroundWindow();
-        let our_tid = GetCurrentThreadId();
-        let foreground_tid = if foreground.0 == std::ptr::null_mut() || foreground == hwnd {
-            0
-        } else {
-            GetWindowThreadProcessId(foreground, None)
-        };
-        let should_attach = foreground_tid != 0 && foreground_tid != our_tid;
-
-        if should_attach {
-            let _ = AttachThreadInput(our_tid, foreground_tid, true);
-        }
-
-        let _ = SetForegroundWindow(hwnd);
-        let _ = SetFocus(Some(hwnd));
-
-        if should_attach {
-            let _ = AttachThreadInput(our_tid, foreground_tid, false);
-        }
-
-        easysearch_core::log_debug!(
-            "force_foreground: foreground={}",
             GetForegroundWindow() == hwnd
         );
     }
@@ -245,7 +238,7 @@ pub(super) fn hide_if_deactivated(hwnd: HWND) {
         easysearch_core::log_debug!("deactivation check: state busy, force hiding via Win32");
         unsafe {
             let _ = ShowWindow(hwnd, SW_HIDE);
-            let _ = KillTimer(Some(hwnd), DEFERRED_POLL_TIMER_ID);
+            stop_transient_timers(hwnd);
         }
     }
 
@@ -272,6 +265,10 @@ fn clear_hidden_state(app: &mut super::app_state::AppState) -> HWND {
     app.context_items.clear();
     app.plugin_items.clear();
     app.deferred_query = None;
+    app.pending_window_size = None;
+    app.search_active = false;
+    app.busy_timer_running = false;
+    app.anim_frame = ANIM_TOTAL_FRAMES;
     app.plugin_router.reset_search_sessions();
     app.preview = None;
     app.preview_seq += 1;
@@ -302,102 +299,22 @@ pub(super) fn hide_window() {
     if let Some(hwnd) = hwnd {
         unsafe {
             let _ = ShowWindow(hwnd, SW_HIDE);
-            let _ = KillTimer(Some(hwnd), DEFERRED_POLL_TIMER_ID);
+            stop_transient_timers(hwnd);
         }
     }
 }
 
-/// Show the window with fade-in animation.
-/// Flow.Launcher uses CircleEase animation, 160-560ms.
-/// We use AnimateWindow(AW_BLEND) for similar effect.
 #[cfg(windows)]
-#[allow(dead_code)]
-pub(super) fn show_window(app: &mut super::app_state::AppState) {
+unsafe fn stop_transient_timers(hwnd: HWND) {
     unsafe {
-        // Multi-monitor support: show on the active monitor
-        unsafe extern "system" {
-            fn GetCursorPos(lp_point: *mut windows::Win32::Foundation::POINT) -> i32;
+        for timer_id in [
+            DEFERRED_POLL_TIMER_ID,
+            SEARCH_DEBOUNCE_TIMER_ID,
+            BUSY_ANIM_TIMER_ID,
+            ANIM_TIMER_ID,
+            RENDER_RETRY_TIMER_ID,
+        ] {
+            let _ = KillTimer(Some(hwnd), timer_id);
         }
-
-        let mut cursor_pos = windows::Win32::Foundation::POINT { x: 0, y: 0 };
-        GetCursorPos(&mut cursor_pos);
-        easysearch_core::log_debug!(
-            "show_window: cursor at ({}, {})",
-            cursor_pos.x,
-            cursor_pos.y
-        );
-
-        let monitor = windows::Win32::Graphics::Gdi::MonitorFromPoint(
-            cursor_pos,
-            windows::Win32::Graphics::Gdi::MONITOR_DEFAULTTOPRIMARY,
-        );
-
-        let mut mi = windows::Win32::Graphics::Gdi::MONITORINFO {
-            cbSize: std::mem::size_of::<windows::Win32::Graphics::Gdi::MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        let _ = windows::Win32::Graphics::Gdi::GetMonitorInfoW(monitor, &mut mi);
-
-        let work = mi.rcWork;
-        let mon_width = work.right - work.left;
-        let mon_height = work.bottom - work.top;
-
-        let width = layout::window_width_scaled(app.hwnd);
-        let height = layout::window_height_scaled(app.items.len(), app.hwnd);
-        let x = work.left + (mon_width - width) / 2;
-        let y = work.top + mon_height / 4;
-
-        easysearch_core::log_debug!("show_window: SetWindowPos x={x} y={y} w={width} h={height}");
-        let _ = SetWindowPos(
-            app.hwnd,
-            Some(HWND_TOPMOST),
-            x,
-            y,
-            width,
-            height,
-            SWP_NOACTIVATE,
-        );
-
-        easysearch_core::log_debug!("show_window: ShowWindow(SW_SHOW)");
-        let _ = ShowWindow(app.hwnd, SW_SHOW);
-
-        easysearch_core::log_debug!("show_window: force foreground focus");
-        force_foreground(app.hwnd);
     }
-    app.visible = true;
-    easysearch_core::log_debug!("show_window: done, visible=true");
-}
-
-/// Hide with fade-out animation (old version — only call when already holding borrow
-/// and you know ShowWindow won't be needed, or refactor the caller).
-#[cfg(windows)]
-#[allow(dead_code)]
-pub(super) fn hide_window_inner(app: &mut super::app_state::AppState) {
-    if !app.visible {
-        return;
-    }
-    // NOTE: ShowWindow here can cause re-entrancy! This function should only be called
-    // from contexts where the borrow has been released, or when we accept the risk.
-    unsafe {
-        let _ = ShowWindow(app.hwnd, SW_HIDE);
-        let _ = KillTimer(Some(app.hwnd), DEFERRED_POLL_TIMER_ID);
-    }
-    app.visible = false;
-    app.input.clear();
-    app.items.clear();
-    app.result_items.clear();
-    app.context_items.clear();
-    app.plugin_items.clear();
-    app.deferred_query = None;
-    app.plugin_router.reset_search_sessions();
-    app.preview = None;
-    app.preview_seq += 1;
-    app.selected_index = 0;
-    app.scroll_offset = 0;
-    app.result_selected_index = 0;
-    app.context_selected_index = 0;
-    app.context_source_index = None;
-    app.pending_ime_char_suppression = 0;
-    app.view_mode = ViewMode::Results;
-    app.input_focused = true;
 }

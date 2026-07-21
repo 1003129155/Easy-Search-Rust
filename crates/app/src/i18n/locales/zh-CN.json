@@ -4,6 +4,7 @@
   "placeholder_indexing": "正在构建索引...",
   "tray_show": "显示",
   "tray_settings": "设置",
+  "tray_clear_cache_rebuild": "清除缓存并重新读取",
   "tray_exit": "退出",
   "tray_tooltip": "EasySearch",
   "tray_tooltip_indexing": "EasySearch（正在构建索引...）",

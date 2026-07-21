@@ -4,7 +4,7 @@
 //! Supports selection highlight, cursor blinking, and index status display.
 
 #[cfg(windows)]
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HWND};
 #[cfg(windows)]
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
@@ -59,19 +59,47 @@ pub struct DisplayItem {
 /// Renderer state holding D2D and DWrite resources.
 #[cfg(windows)]
 pub struct Renderer {
-    pub factory: ID2D1Factory1,
-    pub render_target: Option<ID2D1HwndRenderTarget>,
-    pub dwrite_factory: IDWriteFactory,
-    pub text_format_title: IDWriteTextFormat,
-    pub text_format_subtitle: IDWriteTextFormat,
-    pub text_format_input: IDWriteTextFormat,
+    factory: ID2D1Factory1,
+    dwrite_factory: IDWriteFactory,
+    text_format_title: IDWriteTextFormat,
+    text_format_subtitle: IDWriteTextFormat,
+    text_format_input: IDWriteTextFormat,
     pub theme: Theme,
+    target: TargetState,
+    device: Option<DeviceResources>,
+}
+
+/// Resources whose lifetime is tied to the current Direct2D render target.
+///
+/// Keep every render-target-domain object in this one owner so a device loss
+/// can discard the complete resource domain with a single `Option::take`.
+#[cfg(windows)]
+struct DeviceResources {
+    // Drop target-created bitmaps before releasing the render target itself.
+    icon_cache: super::icon::IconCache,
+    render_target: ID2D1HwndRenderTarget,
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+struct TargetState {
+    hwnd: HWND,
+    width: u32,
+    height: u32,
+    dpi_x: u32,
+    dpi_y: u32,
 }
 
 #[cfg(windows)]
 impl Renderer {
     /// Initialize renderer with D2D factory and DWrite.
-    pub fn new() -> Result<Self, String> {
+    pub fn new(
+        hwnd: HWND,
+        width: u32,
+        height: u32,
+        dpi_x: u32,
+        dpi_y: u32,
+    ) -> Result<Self, String> {
         let factory: ID2D1Factory1 =
             unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) }
                 .map_err(|e| format!("D2D1CreateFactory failed: {e}"))?;
@@ -125,24 +153,28 @@ impl Renderer {
         }
         .map_err(|e| format!("CreateTextFormat (input) failed: {e}"))?;
 
-        Ok(Self {
+        let mut renderer = Self {
             factory,
-            render_target: None,
             dwrite_factory,
             text_format_title,
             text_format_subtitle,
             text_format_input,
             theme: Theme::system(),
-        })
+            target: TargetState {
+                hwnd,
+                width,
+                height,
+                dpi_x,
+                dpi_y,
+            },
+            device: None,
+        };
+        renderer.ensure_device_resources()?;
+        Ok(renderer)
     }
 
-    /// Create or recreate the render target for the given window.
-    pub fn create_render_target(
-        &mut self,
-        hwnd: HWND,
-        width: u32,
-        height: u32,
-    ) -> Result<(), String> {
+    fn build_device_resources(&self) -> Result<DeviceResources, String> {
+        let target = self.target;
         let render_props = D2D1_RENDER_TARGET_PROPERTIES {
             pixelFormat: D2D1_PIXEL_FORMAT {
                 format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -152,8 +184,11 @@ impl Renderer {
         };
 
         let hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES {
-            hwnd,
-            pixelSize: D2D_SIZE_U { width, height },
+            hwnd: target.hwnd,
+            pixelSize: D2D_SIZE_U {
+                width: target.width,
+                height: target.height,
+            },
             ..Default::default()
         };
 
@@ -163,15 +198,42 @@ impl Renderer {
         }
         .map_err(|e| format!("CreateHwndRenderTarget failed: {e}"))?;
 
-        self.render_target = Some(rt);
+        unsafe {
+            rt.SetDpi(target.dpi_x as f32, target.dpi_y as f32);
+        }
+
+        Ok(DeviceResources {
+            icon_cache: super::icon::IconCache::new(),
+            render_target: rt,
+        })
+    }
+
+    fn ensure_device_resources(&mut self) -> Result<(), String> {
+        if self.device.is_none() && self.target.width > 0 && self.target.height > 0 {
+            self.device = Some(self.build_device_resources()?);
+        }
         Ok(())
     }
 
     /// Resize the render target.
     pub fn resize(&mut self, width: u32, height: u32) {
-        if let Some(ref rt) = self.render_target {
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        self.target.width = width;
+        self.target.height = height;
+
+        let resize_error = self.device.as_ref().and_then(|device| {
             let size = D2D_SIZE_U { width, height };
-            let _ = unsafe { rt.Resize(&size) };
+            unsafe { device.render_target.Resize(&size) }.err()
+        });
+        if let Some(error) = resize_error {
+            easysearch_core::log_warn!(
+                "Direct2D Resize failed ({}); discarding device resources",
+                error.code()
+            );
+            self.device.take();
         }
     }
 
@@ -181,16 +243,18 @@ impl Renderer {
     /// a live Windows scale change (for example 100% -> 125%) enlarges the
     /// window but Direct2D continues drawing at the old scale.
     pub fn set_dpi(&mut self, dpi_x: u32, dpi_y: u32) {
-        if let Some(ref rt) = self.render_target {
+        self.target.dpi_x = dpi_x;
+        self.target.dpi_y = dpi_y;
+        if let Some(ref device) = self.device {
             unsafe {
-                rt.SetDpi(dpi_x as f32, dpi_y as f32);
+                device.render_target.SetDpi(dpi_x as f32, dpi_y as f32);
             }
         }
     }
 
     /// Render the full search UI.
     pub fn render(
-        &self,
+        &mut self,
         input_text: &str,
         cursor_pos: usize,
         selection_range: (usize, usize),
@@ -199,16 +263,81 @@ impl Renderer {
         selected_index: usize,
         scroll_offset: usize,
         placeholder: &str,
-        icon_cache: &mut super::icon::IconCache,
         anim_progress: f32,
         search_active: bool,
         preview: Option<(&super::preview::PreviewInfo, f32)>,
         input_focused: bool,
         cursor_moved_at: u128,
-    ) {
-        let Some(ref rt) = self.render_target else {
-            return;
-        };
+    ) -> Result<(), String> {
+        for attempt in 0..2 {
+            self.ensure_device_resources()?;
+            let Some(mut device) = self.device.take() else {
+                return Ok(());
+            };
+
+            let result = self.render_frame(
+                &mut device,
+                input_text,
+                cursor_pos,
+                selection_range,
+                has_selection,
+                items,
+                selected_index,
+                scroll_offset,
+                placeholder,
+                anim_progress,
+                search_active,
+                preview,
+                input_focused,
+                cursor_moved_at,
+            );
+
+            match result {
+                Ok(()) => {
+                    self.device = Some(device);
+                    return Ok(());
+                }
+                Err(error) if error.code() == D2DERR_RECREATE_TARGET => {
+                    easysearch_core::log_warn!(
+                        "Direct2D device lost during EndDraw; rebuilding device resources"
+                    );
+                    // `device` is deliberately not put back. Its render target
+                    // and every target-created bitmap are discarded together.
+                    if attempt == 1 {
+                        return Err(format!(
+                            "EndDraw still reports device loss after rebuild: {error}"
+                        ));
+                    }
+                }
+                Err(error) => {
+                    return Err(format!("EndDraw failed: {error}"));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_frame(
+        &self,
+        device: &mut DeviceResources,
+        input_text: &str,
+        cursor_pos: usize,
+        selection_range: (usize, usize),
+        has_selection: bool,
+        items: &[DisplayItem],
+        selected_index: usize,
+        scroll_offset: usize,
+        placeholder: &str,
+        anim_progress: f32,
+        search_active: bool,
+        preview: Option<(&super::preview::PreviewInfo, f32)>,
+        input_focused: bool,
+        cursor_moved_at: u128,
+    ) -> windows::core::Result<()> {
+        let rt = &device.render_target;
+        let icon_cache = &mut device.icon_cache;
 
         unsafe {
             rt.BeginDraw();
@@ -407,6 +536,7 @@ impl Renderer {
                         super::icon::IconLookup::Loading => {
                             self.draw_loading_spinner(rt, icon_x, icon_y, anim_progress, opacity);
                         }
+                        super::icon::IconLookup::Missing => {}
                     }
                 }
 
@@ -555,8 +685,32 @@ impl Renderer {
                 self.draw_preview_content(rt, preview_info, y_offset);
             }
 
-            let _ = rt.EndDraw(None, None);
+            rt.EndDraw(None, None)
         }
+    }
+
+    pub fn finish_icon_load(
+        &mut self,
+        request: super::icon::IconLoadRequest,
+        pixels: Option<super::icon::IconPixels>,
+    ) {
+        if let Some(device) = self.device.as_mut() {
+            device
+                .icon_cache
+                .finish_load(request, pixels, &device.render_target);
+        }
+    }
+
+    pub fn has_pending_icon_loads(&self) -> bool {
+        self.device
+            .as_ref()
+            .is_some_and(|device| device.icon_cache.has_pending_loads())
+    }
+
+    pub fn take_icon_load_requests(&mut self) -> Vec<super::icon::IconLoadRequest> {
+        self.device
+            .as_mut()
+            .map_or_else(Vec::new, |device| device.icon_cache.take_load_requests())
     }
 
     /// Draw text with highlighted (accent-colored) character ranges.
@@ -598,9 +752,10 @@ impl Renderer {
                 startPosition: 0,
                 length: wide.len() as u32,
             };
-            unsafe {
-                let brush_ref: &ID2D1Brush = &brush.cast().unwrap();
-                let _ = layout.SetDrawingEffect(brush_ref, range);
+            if let Ok(brush_ref) = brush.cast::<ID2D1Brush>() {
+                unsafe {
+                    let _ = layout.SetDrawingEffect(&brush_ref, range);
+                }
             }
         }
 
@@ -626,25 +781,23 @@ impl Renderer {
                     startPosition: utf16_start,
                     length: utf16_len,
                 };
-                unsafe {
-                    let brush_ref: &ID2D1Brush = &brush.cast().unwrap();
-                    let _ = layout.SetDrawingEffect(brush_ref, range);
+                if let Ok(brush_ref) = brush.cast::<ID2D1Brush>() {
+                    unsafe {
+                        let _ = layout.SetDrawingEffect(&brush_ref, range);
+                    }
                 }
             }
         }
 
         // Draw the layout
-        unsafe {
+        if let Ok(brush) = self.create_brush_alpha(rt, base_color, opacity) {
             let origin = windows_numerics::Vector2 {
                 X: rect.left,
                 Y: rect.top,
             };
-            rt.DrawTextLayout(
-                origin,
-                &layout,
-                &self.create_brush_alpha(rt, base_color, opacity).unwrap(),
-                D2D1_DRAW_TEXT_OPTIONS_CLIP,
-            );
+            unsafe {
+                rt.DrawTextLayout(origin, &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            }
         }
     }
 
@@ -751,22 +904,6 @@ impl Renderer {
                     );
                 }
             }
-        }
-    }
-
-    /// Render preview info panel below the result list.
-    /// Render preview info panel below the result list.
-    /// Called separately after the main render when a preview is available.
-    #[allow(dead_code)]
-    pub fn render_preview(&self, preview: &super::preview::PreviewInfo, y_offset: f32) {
-        let Some(ref rt) = self.render_target else {
-            return;
-        };
-
-        unsafe {
-            rt.BeginDraw();
-            self.draw_preview_content(rt, preview, y_offset);
-            let _ = rt.EndDraw(None, None);
         }
     }
 

@@ -141,12 +141,6 @@ pub fn window_height_with_preview(result_count: usize, has_preview: bool) -> f32
     }
 }
 
-/// Calculate total window height (physical pixels) scaled for the given window's DPI.
-#[cfg(windows)]
-pub fn window_height_scaled(result_count: usize, hwnd: HWND) -> i32 {
-    scale(window_height(result_count), hwnd)
-}
-
 /// Calculate total window height with preview (physical pixels) scaled for DPI.
 #[cfg(windows)]
 pub fn window_height_with_preview_scaled(

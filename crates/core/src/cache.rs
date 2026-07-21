@@ -5,6 +5,7 @@
 //! # File layout
 //!
 //! ```text
+//! [UFFSENC v2 envelope (AES-256-GCM)]
 //! [EsCacheHeader    112 bytes]
 //! [records          record_count × 24 bytes]
 //! [names            name_bytes bytes]
@@ -16,8 +17,9 @@
 //!
 //! # Atomic write
 //!
-//! Writes go to `<name>.tmp` then rename to `<name>` so a crash during
-//! write never leaves a partial cache visible to a reader.
+//! The plaintext payload is encrypted with AES-256-GCM before it is written.
+//! Writes go to `<name>.tmp` then rename to `<name>` so a crash during write
+//! never leaves a partial cache visible to a reader.
 
 use std::fs;
 use std::io::Write;
@@ -32,6 +34,18 @@ use crate::index::{EsIndex, FileRefMap};
 use crate::record::{ES_RECORD_BYTES, EsRecord};
 use crate::search::EsSearchIndex;
 use crate::status::EsIndexStatus;
+
+#[cfg(not(test))]
+fn cache_key() -> std::io::Result<[u8; 32]> {
+    uffs_security::keystore::get_cache_key()
+}
+
+// Cache unit tests should be hermetic and must not create or mutate the user's
+// platform keystore. The crypto module separately tests real key management.
+#[cfg(test)]
+fn cache_key() -> std::io::Result<[u8; 32]> {
+    Ok([0xA5; 32])
+}
 
 /// Copy-and-cast `bytes` into a `Vec<T>` without requiring alignment.
 fn pod_collect_unaligned<T: bytemuck::Pod>(bytes: &[u8]) -> Vec<T> {
@@ -78,11 +92,21 @@ pub fn write_flow_cache(
     let final_path = cache_dir.join(cache_file_name(volume_serial));
     let tmp_path = tmp_path(&final_path);
 
+    let mut plaintext = Vec::new();
+    write_to(&mut plaintext, index, volume_serial, usn_journal_id)?;
+    let key = cache_key().map_err(|e| EsError::CacheIo {
+        detail: format!("get cache encryption key: {e}"),
+    })?;
+    let encrypted =
+        uffs_security::crypto::encrypt_cache(&plaintext, &key).map_err(|e| EsError::CacheIo {
+            detail: format!("encrypt cache: {e}"),
+        })?;
+
     {
         let mut file = fs::File::create(&tmp_path).map_err(|e| EsError::CacheIo {
             detail: format!("create tmp: {e}"),
         })?;
-        write_to(&mut file, index, volume_serial, usn_journal_id)?;
+        write_all(&mut file, &encrypted)?;
         file.flush().map_err(|e| EsError::CacheIo {
             detail: format!("flush tmp: {e}"),
         })?;
@@ -172,10 +196,41 @@ pub fn read_flow_cache(cache_dir: &Path, volume_serial: u64) -> Result<Option<Es
     if !path.exists() {
         return Ok(None);
     }
-    let data = fs::read(&path).map_err(|e| EsError::CacheIo {
+    let stored = fs::read(&path).map_err(|e| EsError::CacheIo {
         detail: format!("read {}: {e}", path.display()),
     })?;
-    Ok(Some(parse_cache_bytes(&data, volume_serial)?))
+
+    let legacy_plaintext = stored.starts_with(&crate::cache_header::ES_CACHE_MAGIC);
+    let plaintext = if legacy_plaintext {
+        stored
+    } else {
+        let key = cache_key().map_err(|e| EsError::CacheIo {
+            detail: format!("get cache decryption key: {e}"),
+        })?;
+        match uffs_security::crypto::decrypt_cache(&stored, &key) {
+            Ok(data) => data,
+            Err(e) => {
+                let _ = fs::remove_file(&path);
+                return Err(EsError::CacheIo {
+                    detail: format!("decrypt {}: {e}", path.display()),
+                });
+            }
+        }
+    };
+
+    let index = parse_cache_bytes(&plaintext, volume_serial)?;
+    if legacy_plaintext {
+        if let Err(error) =
+            write_flow_cache(&index, cache_dir, volume_serial, index.status.journal_id)
+        {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "failed to migrate plaintext flow cache to encrypted format"
+            );
+        }
+    }
+    Ok(Some(index))
 }
 
 fn parse_cache_bytes(data: &[u8], volume_serial: u64) -> Result<EsIndex> {
@@ -356,6 +411,13 @@ mod tests {
 
         write_flow_cache(&idx, dir.path(), volume_serial, 0).unwrap();
 
+        let stored = fs::read(dir.path().join(cache_file_name(volume_serial))).unwrap();
+        assert!(matches!(
+            uffs_security::crypto::detect_format(&stored),
+            uffs_security::crypto::CacheFormat::Encrypted
+        ));
+        assert!(!stored.windows(10).any(|bytes| bytes == b"readme.txt"));
+
         let loaded = read_flow_cache(dir.path(), volume_serial)
             .unwrap()
             .expect("cache file should exist after write");
@@ -371,6 +433,25 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let result = read_flow_cache(dir.path(), 0x9999).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn legacy_plaintext_is_migrated_after_read() {
+        let dir = TempDir::new().unwrap();
+        let idx = build_small_index();
+        let serial = 0xCAFE_BABE_u64;
+        let path = dir.path().join(cache_file_name(serial));
+        let mut plaintext = Vec::new();
+        write_to(&mut plaintext, &idx, serial, 9).unwrap();
+        fs::write(&path, plaintext).unwrap();
+
+        let loaded = read_flow_cache(dir.path(), serial).unwrap().unwrap();
+        assert_eq!(loaded.records_len(), idx.records_len());
+        let migrated = fs::read(path).unwrap();
+        assert!(matches!(
+            uffs_security::crypto::detect_format(&migrated),
+            uffs_security::crypto::CacheFormat::Encrypted
+        ));
     }
 
     #[test]

@@ -623,11 +623,84 @@ impl SearchEngine {
     /// Force rebuild a drive's index (drop cache, re-read MFT).
     pub fn rebuild_drive(&self, drive: char) {
         let letter = drive.to_ascii_uppercase();
-        // Remove existing, then re-add
         if let Ok(mut mgr) = self.inner.write() {
             mgr.remove(letter);
         }
-        self.add_drive(letter);
+
+        let inner = Arc::clone(&self.inner);
+        let metrics = Arc::clone(&self.metrics);
+        let event_tx = self.event_tx.clone();
+        let cache_dir = self.config.cache_dir.clone();
+        emit(&event_tx, EngineEvent::DriveIndexing { drive: letter });
+
+        thread::Builder::new()
+            .name(format!("engine-rebuild-{letter}"))
+            .spawn(move || {
+                let start = Instant::now();
+                // Passing no cache directory is intentional: a forced rebuild
+                // must always read the live MFT, never race with an old cache.
+                match build_index(letter, None) {
+                    Ok(index) => {
+                        let elapsed = start.elapsed();
+                        let records = index.records_len() as u64;
+                        persist_compact_cache(letter, &index, cache_dir.as_deref());
+                        if let Ok(mut mgr) = inner.write() {
+                            mgr.install(letter, index);
+                        }
+                        metrics.record_build(letter, elapsed);
+                        emit(
+                            &event_tx,
+                            EngineEvent::DriveReady {
+                                drive: letter,
+                                records,
+                                elapsed,
+                            },
+                        );
+                    }
+                    Err(error) => emit(
+                        &event_tx,
+                        EngineEvent::DriveError {
+                            drive: letter,
+                            error,
+                        },
+                    ),
+                }
+            })
+            .ok();
+    }
+
+    /// Delete persisted flow caches and rebuild every configured drive from MFT.
+    ///
+    /// Returns the number of drives whose rebuild was started.
+    pub fn clear_cache_and_rebuild(&self) -> Result<usize, String> {
+        if let Some(cache_dir) = self.config.cache_dir.as_deref()
+            && cache_dir.exists()
+        {
+            for entry in std::fs::read_dir(cache_dir)
+                .map_err(|error| format!("read cache directory: {error}"))?
+            {
+                let entry = entry.map_err(|error| format!("read cache entry: {error}"))?;
+                let path = entry.path();
+                let is_flow_cache = path.extension().is_some_and(|ext| ext == "flowcache")
+                    || path
+                        .file_name()
+                        .is_some_and(|name| name.to_string_lossy().ends_with(".flowcache.tmp"));
+                if is_flow_cache {
+                    std::fs::remove_file(&path)
+                        .map_err(|error| format!("remove cache {}: {error}", path.display()))?;
+                }
+            }
+        }
+
+        let drives: Vec<char> = self
+            .drive_labels()
+            .into_iter()
+            .filter_map(|label| label.chars().next())
+            .collect();
+        for &drive in &drives {
+            self.rebuild_drive(drive);
+        }
+        Ok(drives.len())
     }
 
     /// Signal the engine to shut down gracefully.

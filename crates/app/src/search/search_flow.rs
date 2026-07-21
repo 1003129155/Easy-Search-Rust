@@ -46,6 +46,7 @@ pub(super) fn on_input_changed(app: &mut AppState) {
         let _ = KillTimer(Some(app.hwnd), SEARCH_DEBOUNCE_TIMER_ID);
         let _ = KillTimer(Some(app.hwnd), BUSY_ANIM_TIMER_ID);
     }
+    app.busy_timer_running = false;
 
     if query.trim().is_empty() {
         app.plugin_router.reset_search_sessions();
@@ -106,38 +107,49 @@ pub(super) fn run_debounced_search(app: &mut AppState) {
                 DEFERRED_POLL_MS,
                 None,
             );
-            let _ = SetTimer(Some(app.hwnd), BUSY_ANIM_TIMER_ID, ANIM_FRAME_MS, None);
+            if !app.busy_timer_running {
+                app.busy_timer_running =
+                    SetTimer(Some(app.hwnd), BUSY_ANIM_TIMER_ID, ANIM_FRAME_MS, None) != 0;
+            }
         }
     } else {
         app.search_active = false;
     }
 }
 
-/// Resize window to fit the current number of results.
+/// Queue the latest window size required by the current results.
+///
+/// Applying `SetWindowPos` here would synchronously re-enter `WM_SIZE` while
+/// `AppState` is mutably borrowed. Post one layout message instead; repeated
+/// result changes overwrite `pending_window_size` and are applied together.
 #[cfg(windows)]
 pub(super) fn resize_for_results(app: &mut AppState) {
     let has_preview = app.preview.is_some() && app.view_mode == ViewMode::ContextActions;
     let height = layout::window_height_with_preview_scaled(app.items.len(), has_preview, app.hwnd);
     let width = layout::window_width_scaled(app.hwnd);
 
-    if app.last_window_size == (width, height) {
+    let requested_size = (width, height);
+    if app.last_window_size == requested_size {
+        app.pending_window_size = None;
         return;
     }
-    app.last_window_size = (width, height);
 
-    unsafe {
-        let _ = SetWindowPos(
-            app.hwnd,
-            None,
-            0,
-            0,
-            width,
-            height,
-            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-        );
+    let should_post = app.pending_window_size.is_none();
+    app.pending_window_size = Some(requested_size);
+    if should_post
+        && unsafe {
+            PostMessageW(
+                Some(app.hwnd),
+                WM_APPLY_WINDOW_SIZE,
+                Default::default(),
+                Default::default(),
+            )
+        }
+        .is_err()
+    {
+        app.pending_window_size = None;
+        easysearch_core::log_warn!("failed to queue search window resize");
     }
-    // Manually resize render target since WM_SIZE handler may be skipped due to re-entrancy
-    app.renderer.resize(width as u32, height as u32);
 }
 
 /// Poll the deferred (background) query receiver and merge results if ready.

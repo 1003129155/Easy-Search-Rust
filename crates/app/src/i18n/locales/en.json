@@ -4,6 +4,7 @@
   "placeholder_indexing": "Building index...",
   "tray_show": "Show",
   "tray_settings": "Settings",
+  "tray_clear_cache_rebuild": "Clear cache and rebuild index",
   "tray_exit": "Exit",
   "tray_tooltip": "EasySearch",
   "tray_tooltip_indexing": "EasySearch (indexing...)",

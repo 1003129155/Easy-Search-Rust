@@ -8,6 +8,7 @@
 
 pub mod action;
 mod app_state;
+mod cache_actions;
 pub mod clipboard;
 pub mod context;
 mod engine_bridge;

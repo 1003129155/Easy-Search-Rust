@@ -14,7 +14,9 @@ use std::sync::{OnceLock, mpsc};
 #[cfg(windows)]
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 #[cfg(windows)]
-use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, SetTimer};
+use windows::Win32::Graphics::Gdi::InvalidateRect;
+#[cfg(windows)]
+use windows::Win32::UI::WindowsAndMessaging::{KillTimer, PostMessageW, SetTimer};
 
 #[cfg(windows)]
 use super::app_state;
@@ -24,13 +26,31 @@ use super::app_state::ViewMode;
 use super::layout;
 #[cfg(windows)]
 use super::messages::{
-    ANIM_FRAME_MS, ANIM_TOTAL_FRAMES, BUSY_ANIM_TIMER_ID, IconReadyPayload, WM_ICON_READY,
+    ANIM_FRAME_MS, ANIM_TOTAL_FRAMES, BUSY_ANIM_TIMER_ID, IconReadyPayload, RENDER_RETRY_MS,
+    RENDER_RETRY_TIMER_ID, WM_ICON_READY,
 };
 
-/// Trigger a re-render.
+/// Request a paint. Windows coalesces repeated invalidations into one
+/// low-priority `WM_PAINT`, so bursts of timers and icon completions do not
+/// synchronously redraw the complete window for every event.
 #[cfg(windows)]
-pub(super) fn do_render() {
-    app_state::with_app_mut(|app| {
+pub(super) fn request_render() {
+    let hwnd = app_state::with_app_ref(|app| app.visible.then_some(app.hwnd)).flatten();
+    if let Some(hwnd) = hwnd {
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
+    }
+}
+
+/// Render the current state immediately. This is called only by `WM_PAINT`.
+#[cfg(windows)]
+pub(super) fn render_now(hwnd: HWND) {
+    let state_available = app_state::with_app_mut(|app| {
+        if !app.visible {
+            return;
+        }
+
         // Determine placeholder text based on index state
         let placeholder = if let Some(ref err) = app.index_error {
             err.as_str()
@@ -65,7 +85,7 @@ pub(super) fn do_render() {
             .scroll_offset
             .min(app.items.len().saturating_sub(layout::MAX_VISIBLE_ITEMS));
 
-        app.renderer.render(
+        let render_result = app.renderer.render(
             app.input.text(),
             app.input.cursor(),
             app.input.selection_range(),
@@ -82,22 +102,53 @@ pub(super) fn do_render() {
             },
             app.scroll_offset,
             placeholder,
-            &mut app.icon_cache,
             anim_progress,
             app.search_active,
             preview_param,
             app.input_focused,
             app.cursor_moved_at,
         );
-
-        let icon_requests = app.icon_cache.take_load_requests();
-        if !icon_requests.is_empty() {
+        if let Err(error) = render_result {
+            easysearch_core::log_warn!("search window render failed: {error}");
             unsafe {
-                let _ = SetTimer(Some(app.hwnd), BUSY_ANIM_TIMER_ID, ANIM_FRAME_MS, None);
+                // EndPaint validates the current update region. Retry on a
+                // short backoff so a temporarily unavailable device cannot
+                // leave the popup blank, without creating a hot paint loop.
+                let _ = SetTimer(Some(app.hwnd), RENDER_RETRY_TIMER_ID, RENDER_RETRY_MS, None);
             }
+            return;
+        }
+
+        unsafe {
+            let _ = KillTimer(Some(app.hwnd), RENDER_RETRY_TIMER_ID);
+        }
+
+        let icon_requests = app.renderer.take_icon_load_requests();
+        let needs_busy_animation = app.search_active || app.renderer.has_pending_icon_loads();
+        if needs_busy_animation && !app.busy_timer_running {
+            unsafe {
+                app.busy_timer_running =
+                    SetTimer(Some(app.hwnd), BUSY_ANIM_TIMER_ID, ANIM_FRAME_MS, None) != 0;
+            }
+        } else if !needs_busy_animation && app.busy_timer_running {
+            unsafe {
+                let _ = KillTimer(Some(app.hwnd), BUSY_ANIM_TIMER_ID);
+            }
+            app.busy_timer_running = false;
+        }
+        if !icon_requests.is_empty() {
             spawn_icon_loads(app.hwnd, app.current_search_seq, icon_requests);
         }
     });
+
+    if state_available.is_none() {
+        unsafe {
+            // A synchronous message temporarily owned AppState. EndPaint will
+            // validate this region, so arrange a bounded retry instead of
+            // silently losing the frame.
+            let _ = SetTimer(Some(hwnd), RENDER_RETRY_TIMER_ID, RENDER_RETRY_MS, None);
+        }
+    }
 }
 
 #[cfg(windows)]

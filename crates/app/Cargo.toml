@@ -59,7 +59,6 @@ windows = { version = "0.62", features = [
     "Win32_System_Shutdown",
     "Win32_System_Power",
     "Win32_Graphics_Dwm",
-    "Win32_UI_Controls",
     "Win32_System_Registry",
     "Win32_System_Time",
 ] }

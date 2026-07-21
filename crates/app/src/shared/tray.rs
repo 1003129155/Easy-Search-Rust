@@ -20,6 +20,7 @@ use windows::core::PCWSTR;
 pub const WM_TRAY_ICON: u32 = 0x0400 + 100;
 pub const IDM_SETTINGS: u32 = 2001;
 pub const IDM_EXIT: u32 = 2002;
+pub const IDM_CLEAR_CACHE_REBUILD: u32 = 2003;
 
 const TRAY_ID: u32 = 1;
 
@@ -115,6 +116,11 @@ pub fn show_context_menu(hwnd: HWND) {
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
+    let clear_cache_label: Vec<u16> = i18n
+        .get("tray_clear_cache_rebuild")
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
 
     unsafe {
         let hmenu = CreatePopupMenu().unwrap_or_default();
@@ -123,6 +129,12 @@ pub fn show_context_menu(hwnd: HWND) {
             MF_STRING,
             IDM_SETTINGS as usize,
             windows::core::PCWSTR(settings_label.as_ptr()),
+        );
+        let _ = AppendMenuW(
+            hmenu,
+            MF_STRING,
+            IDM_CLEAR_CACHE_REBUILD as usize,
+            windows::core::PCWSTR(clear_cache_label.as_ptr()),
         );
         let _ = AppendMenuW(
             hmenu,

@@ -80,6 +80,7 @@ pub struct IconPixels {
 pub enum IconLookup<'a> {
     Ready(&'a ID2D1Bitmap),
     Loading,
+    Missing,
 }
 
 #[cfg(windows)]
@@ -124,7 +125,7 @@ impl IconCache {
         icon_ref: &str,
         is_directory: bool,
         rt: &ID2D1HwndRenderTarget,
-    ) -> &ID2D1Bitmap {
+    ) -> Option<&ID2D1Bitmap> {
         if icon_assets::is_named_icon(icon_ref) {
             return self.get_from_named_cache(icon_ref, rt);
         }
@@ -153,7 +154,10 @@ impl IconCache {
         rt: &ID2D1HwndRenderTarget,
     ) -> IconLookup<'_> {
         if icon_assets::is_named_icon(icon_ref) {
-            return IconLookup::Ready(self.get_from_named_cache(icon_ref, rt));
+            return match self.get_from_named_cache(icon_ref, rt) {
+                Some(bitmap) => IconLookup::Ready(bitmap),
+                None => IconLookup::Missing,
+            };
         }
 
         let ext = extract_extension(icon_ref);
@@ -183,10 +187,13 @@ impl IconCache {
                         self.path_cache
                             .get(path)
                             .and_then(|bitmap| bitmap.as_ref())
-                            .unwrap(),
+                            .expect("checked cached path bitmap"),
                     );
                 }
-                return IconLookup::Ready(self.builtin_or_missing(BUILTIN_MISSING, rt));
+                return match self.builtin_or_missing(BUILTIN_MISSING, rt) {
+                    Some(bitmap) => IconLookup::Ready(bitmap),
+                    None => IconLookup::Missing,
+                };
             }
             IconCacheKey::Ext(ext_key) if self.ext_cache.contains_key(ext_key) => {
                 if self
@@ -199,10 +206,13 @@ impl IconCache {
                         self.ext_cache
                             .get(ext_key)
                             .and_then(|bitmap| bitmap.as_ref())
-                            .unwrap(),
+                            .expect("checked cached extension bitmap"),
                     );
                 }
-                return IconLookup::Ready(self.builtin_or_missing(BUILTIN_MISSING, rt));
+                return match self.builtin_or_missing(BUILTIN_MISSING, rt) {
+                    Some(bitmap) => IconLookup::Ready(bitmap),
+                    None => IconLookup::Missing,
+                };
             }
             _ => {}
         }
@@ -265,7 +275,11 @@ impl IconCache {
         self.named_cache.len() + self.ext_cache.len() + self.path_cache.len()
     }
 
-    fn get_from_named_cache(&mut self, key: &str, rt: &ID2D1HwndRenderTarget) -> &ID2D1Bitmap {
+    fn get_from_named_cache(
+        &mut self,
+        key: &str,
+        rt: &ID2D1HwndRenderTarget,
+    ) -> Option<&ID2D1Bitmap> {
         if !self.named_cache.contains_key(key) {
             let bitmap = self.load_named_icon_fallible(key, rt);
             self.named_cache.insert(key.to_string(), bitmap);
@@ -277,11 +291,7 @@ impl IconCache {
             .and_then(|bitmap| bitmap.as_ref())
             .is_some()
         {
-            return self
-                .named_cache
-                .get(key)
-                .and_then(|bitmap| bitmap.as_ref())
-                .unwrap();
+            return self.named_cache.get(key).and_then(|bitmap| bitmap.as_ref());
         }
 
         self.builtin_or_missing(BUILTIN_MISSING, rt)
@@ -294,7 +304,7 @@ impl IconCache {
         path: &str,
         is_directory: bool,
         rt: &ID2D1HwndRenderTarget,
-    ) -> &ID2D1Bitmap {
+    ) -> Option<&ID2D1Bitmap> {
         if !self.ext_cache.contains_key(key) {
             let bitmap = self.load_path_icon_fallible(path, is_directory, rt);
             self.ext_cache.insert(key.to_string(), bitmap);
@@ -306,18 +316,18 @@ impl IconCache {
             .and_then(|bitmap| bitmap.as_ref())
             .is_some()
         {
-            return self
-                .ext_cache
-                .get(key)
-                .and_then(|bitmap| bitmap.as_ref())
-                .unwrap();
+            return self.ext_cache.get(key).and_then(|bitmap| bitmap.as_ref());
         }
 
         self.builtin_or_missing(BUILTIN_MISSING, rt)
     }
 
     #[allow(dead_code)]
-    fn get_from_path_cache(&mut self, path: &str, rt: &ID2D1HwndRenderTarget) -> &ID2D1Bitmap {
+    fn get_from_path_cache(
+        &mut self,
+        path: &str,
+        rt: &ID2D1HwndRenderTarget,
+    ) -> Option<&ID2D1Bitmap> {
         if self.path_cache.contains_key(path) {
             self.touch_lru(path);
         } else {
@@ -335,11 +345,7 @@ impl IconCache {
             .and_then(|bitmap| bitmap.as_ref())
             .is_some()
         {
-            return self
-                .path_cache
-                .get(path)
-                .and_then(|bitmap| bitmap.as_ref())
-                .unwrap();
+            return self.path_cache.get(path).and_then(|bitmap| bitmap.as_ref());
         }
 
         self.builtin_or_missing(BUILTIN_MISSING, rt)
@@ -468,7 +474,11 @@ impl IconCache {
         }
     }
 
-    fn builtin_or_missing(&mut self, key: &str, rt: &ID2D1HwndRenderTarget) -> &ID2D1Bitmap {
+    fn builtin_or_missing(
+        &mut self,
+        key: &str,
+        rt: &ID2D1HwndRenderTarget,
+    ) -> Option<&ID2D1Bitmap> {
         if !self.named_cache.contains_key(key) {
             let bitmap = self
                 .load_named_icon_fallible(key, rt)
@@ -482,11 +492,7 @@ impl IconCache {
             .and_then(|bitmap| bitmap.as_ref())
             .is_some()
         {
-            return self
-                .named_cache
-                .get(key)
-                .and_then(|bitmap| bitmap.as_ref())
-                .unwrap();
+            return self.named_cache.get(key).and_then(|bitmap| bitmap.as_ref());
         }
 
         self.named_cache.remove(BUILTIN_MISSING);
@@ -495,7 +501,6 @@ impl IconCache {
         self.named_cache
             .get(BUILTIN_MISSING)
             .and_then(|bitmap| bitmap.as_ref())
-            .expect("builtin missing icon should always exist")
     }
 
     fn create_builtin_bitmap(&self, key: &str, rt: &ID2D1HwndRenderTarget) -> Option<ID2D1Bitmap> {

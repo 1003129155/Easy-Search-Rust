@@ -4,6 +4,7 @@
   "placeholder_indexing": "インデックスを構築中...",
   "tray_show": "表示",
   "tray_settings": "設定",
+  "tray_clear_cache_rebuild": "キャッシュを消去して再読み込み",
   "tray_exit": "終了",
   "tray_tooltip": "EasySearch",
   "tray_tooltip_indexing": "EasySearch（インデックスを構築中...）",
